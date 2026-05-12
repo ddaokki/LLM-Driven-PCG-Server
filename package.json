@@ -1,0 +1,29 @@
+{
+  "name": "llm-pcg-bridge-server",
+  "version": "1.0.0",
+  "description": "LLM-Driven PCG: AI 데이터 검증 및 실시간 세션 관리 서버",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "LLM",
+    "PCG",
+    "Node.js",
+    "Redis",
+    "UnrealEngine"
+  ],
+  "author": "서정민",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.16.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "redis": "^4.7.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
