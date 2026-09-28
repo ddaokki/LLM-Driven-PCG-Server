@@ -85,6 +85,13 @@ Content-Type: application/json
 > `area_type`은 언리얼 `ParseAreaType()` 기준으로 `spawn / combat / goal / danger` 값만 인식합니다.
 > 다른 문자열(`start_zone` 등)을 보내면 전부 `combat`으로 처리되어 버리니 주의하세요.
 
+> ℹ️ **현재 상태**: `/generate-zone`은 구현되어 있지만, 아직 LLM API가 붙지 않아서 `dialogue` 내용을
+> 실제로 해석하지는 않습니다. 요청 body에 `pcg_json`(LLM이 낼 법한 원본 포맷)을 같이 보내면 그걸
+> validator로 보정해서 돌려주고, 안 보내면 기본 존(spawn+goal만 있는 안전한 forest 존)을 반환합니다.
+> 즉 지금도 "테스트 JSON 넘기고 언리얼에서 실제로 구역이 생성되는지" 시연은 바로 가능하고,
+> LLM 파트가 API로 노출되면 `app.js`의 TODO 주석 위치에서 `dialogue -> LLM 호출 -> pcg_json`으로
+> 바꿔 끼우면 됩니다.
+
 ### 2. 로컬에서 붙여보기 (Unreal 없이 먼저 확인)
 
 ```bash
@@ -120,7 +127,7 @@ curl -X POST http://127.0.0.1:8000/generate-zone \
 | Method | Path | 설명 |
 |---|---|---|
 | GET | `/health` | 서버 상태 확인 |
-| POST | `/generate-zone` | 언리얼 클라이언트용 — dialogue를 받아 Zone JSON을 그대로 반환 |
+| POST | `/generate-zone` | 언리얼 클라이언트용 — dialogue(+옵션 `pcg_json`)를 받아 Zone JSON을 그대로 반환. LLM 미연동 상태라 `pcg_json` 없으면 기본 존 반환 |
 | POST | `/api/chat/send` | (내부용) 대화 적재 및 세션 컨텍스트 반환 — Redis 필요 |
 | POST | `/api/world/generate` | (내부용) LLM 원본 출력(`llmResult`)을 받아 검증/보정 |
 

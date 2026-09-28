@@ -5,6 +5,7 @@ const {
   processLLMResponse,
   getFullContext,
 } = require("./sessionManager");
+const { validatePCGParams } = require("./validator");
 
 const app = express();
 app.use(express.json());
@@ -12,6 +13,33 @@ app.use(express.json());
 // 서버 상태 체크
 app.get("/health", (req, res) => {
   res.json({ status: "running" });
+});
+
+/**
+ * 0. 언리얼 클라이언트 실연동용 엔드포인트 (APCGZoneController가 실제로 호출하는 규격)
+ *    - 요청: { "dialogue": [{ "speaker": "...", "text": "..." }, ...] }
+ *    - 응답: 봉투(success/dataForUnreal) 없이 Zone JSON을 최상위로 그대로 반환
+ *      (theme, tree_density, ..., areas: [...])
+ *
+ *    LLM 파트가 아직 HTTP API로 노출되지 않은 상태라, 지금은 dialogue를 받아서
+ *    (있다면) 테스트용 pcg_json을 validator에 통과시키고, 없으면 기본 존을 반환한다.
+ *    -> "테스트 JSON 넘기고 작동 확인" 수준의 실연동 시연에는 이걸로 충분하고,
+ *       LLM API가 붙으면 dialogue -> LLM 호출 -> pcg_json 로 교체하면 된다.
+ */
+app.post("/generate-zone", (req, res) => {
+  try {
+    const { dialogue, pcg_json } = req.body || {};
+    if (dialogue !== undefined && !Array.isArray(dialogue)) {
+      return res.status(400).json({ error: "dialogue는 배열이어야 합니다." });
+    }
+
+    // TODO(LLM API 연동 후): dialogue를 LLM 파이프라인에 넘겨 pcg_json을 실시간 생성
+    const validated = validatePCGParams(pcg_json || null);
+    res.json(validated);
+  } catch (error) {
+    console.error("Generate Zone Error:", error);
+    res.status(500).json(validatePCGParams(null));
+  }
 });
 
 /**
