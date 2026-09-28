@@ -38,14 +38,22 @@ const validatePCGParams = (aiData) => {
   // 언리얼 ParseAreaType() 기준 (spawn/combat/goal/danger). 다른 문자열은 전부 combat으로 보정.
   const validAreaTypes = ["spawn", "combat", "goal", "danger"];
 
+  // 주의: 언리얼 ApplyZoneJsonString()은 밀도/경로 값을 최상위가 아니라
+  // base_environment / main_path 하위 객체에서 읽는다 (PCGZoneController.cpp
+  // TryGetObjectField(TEXT("base_environment")/"main_path") 참고). 최상위에
+  // 평평하게 내려주면 파싱 자체가 실패(및 false 반환)하므로 반드시 중첩시켜야 함.
   const defaultZone = () => ({
     theme: CONFIG.theme,
-    tree_density: CONFIG.density.tree.def,
-    rock_density: CONFIG.density.rock.def,
-    grass_density: CONFIG.density.grass.def,
-    path_type: CONFIG.path_type,
-    path_width: CONFIG.path_width.def,
-    normalized_points: [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }],
+    base_environment: {
+      tree_density: CONFIG.density.tree.def,
+      rock_density: CONFIG.density.rock.def,
+      grass_density: CONFIG.density.grass.def
+    },
+    main_path: {
+      path_type: CONFIG.path_type,
+      path_width: CONFIG.path_width.def,
+      normalized_points: [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }]
+    },
     areas: [
       { area_type: "spawn", normalized_center: { x: 0.1, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
       { area_type: "goal", normalized_center: { x: 0.9, y: 0.5 }, normalized_radius: 0.06, detail_density: 0.4 }
@@ -56,7 +64,7 @@ const validatePCGParams = (aiData) => {
     return defaultZone();
   }
 
-  const validated = {};
+  const validated = { base_environment: {}, main_path: {} };
 
   // theme: 화이트리스트 통과 시에만 LLM 값 반영, 아니면 기본 forest로 보정
   validated.theme = CONFIG.valid_themes.includes(aiData.theme) ? aiData.theme : CONFIG.theme;
@@ -78,13 +86,13 @@ const validatePCGParams = (aiData) => {
 
   // 최종 밀도는 에셋별 허용 범위(min~max)로 클램프 (기획 의도: 나무는 최소 0.2는 있어야 숲처럼 보임 등)
   const finalClamp = (val, min, max) => Math.min(Math.max(val, min), max);
-  validated.tree_density = finalClamp(rawTree, CONFIG.density.tree.min, CONFIG.density.tree.max);
-  validated.rock_density = finalClamp(rawRock, CONFIG.density.rock.min, CONFIG.density.rock.max);
-  validated.grass_density = finalClamp(rawGrass, CONFIG.density.grass.min, CONFIG.density.grass.max);
+  validated.base_environment.tree_density = finalClamp(rawTree, CONFIG.density.tree.min, CONFIG.density.tree.max);
+  validated.base_environment.rock_density = finalClamp(rawRock, CONFIG.density.rock.min, CONFIG.density.rock.max);
+  validated.base_environment.grass_density = finalClamp(rawGrass, CONFIG.density.grass.min, CONFIG.density.grass.max);
 
   // 4. 경로(Path) 데이터 보정
-  validated.path_type = CONFIG.path_type;
-  validated.path_width = finalClamp(
+  validated.main_path.path_type = CONFIG.path_type;
+  validated.main_path.path_width = finalClamp(
     safeNumber(aiData.path_width, CONFIG.path_width.def),
     CONFIG.path_width.min,
     CONFIG.path_width.max
@@ -93,12 +101,12 @@ const validatePCGParams = (aiData) => {
   // 이동 경로 노드 개수 스무딩 및 스케일링
   if (Array.isArray(aiData.normalized_points) && aiData.normalized_points.length >= CONFIG.points_count.min) {
     let points = aiData.normalized_points.slice(0, CONFIG.points_count.max);
-    validated.normalized_points = points.map(pt => ({
+    validated.main_path.normalized_points = points.map(pt => ({
       x: finalClamp(safeNumber(pt && pt.x, 0.5), 0.0, 1.0),
       y: finalClamp(safeNumber(pt && pt.y, 0.5), 0.0, 1.0)
     }));
   } else {
-    validated.normalized_points = [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }];
+    validated.main_path.normalized_points = [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }];
   }
 
   // 5. 구역(Areas) 데이터 보정

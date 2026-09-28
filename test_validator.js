@@ -24,14 +24,15 @@ function runAdvancedTests() {
         };
 
         const result = validatePCGParams(heavyDensityData);
-        const finalSum = result.tree_density + result.rock_density + result.grass_density;
+        const { tree_density, rock_density, grass_density } = result.base_environment;
+        const finalSum = tree_density + rock_density + grass_density;
 
         // 1. 정규화 이후 값이 각 에셋의 CONFIG min/max 범위 안에 있는지 검증
-        assert.ok(result.tree_density <= 0.8 && result.tree_density >= 0.2, `❌ tree_density 범위 이탈: ${result.tree_density}`);
-        assert.ok(result.rock_density <= 0.6 && result.rock_density >= 0.1, `❌ rock_density 범위 이탈: ${result.rock_density}`);
-        assert.ok(result.grass_density <= 0.9 && result.grass_density >= 0.3, `❌ grass_density 범위 이탈: ${result.grass_density}`);
+        assert.ok(tree_density <= 0.8 && tree_density >= 0.2, `❌ tree_density 범위 이탈: ${tree_density}`);
+        assert.ok(rock_density <= 0.6 && rock_density >= 0.1, `❌ rock_density 범위 이탈: ${rock_density}`);
+        assert.ok(grass_density <= 0.9 && grass_density >= 0.3, `❌ grass_density 범위 이탈: ${grass_density}`);
 
-        console.log(`✅ Test 1 성공: 밀도 정규화 + 에셋별 하드 클램프 적용 완료 (총합: ${finalSum.toFixed(2)}, tree=${result.tree_density.toFixed(2)}, rock=${result.rock_density.toFixed(2)}, grass=${result.grass_density.toFixed(2)})`);
+        console.log(`✅ Test 1 성공: 밀도 정규화 + 에셋별 하드 클램프 적용 완료 (총합: ${finalSum.toFixed(2)}, tree=${tree_density.toFixed(2)}, rock=${rock_density.toFixed(2)}, grass=${grass_density.toFixed(2)})`);
     } catch (err) {
         console.error("❌ Test 1 실패:", err.message);
     }
@@ -44,8 +45,8 @@ function runAdvancedTests() {
         const result = validatePCGParams(edgeData);
 
         // 강제로 깎아내린 게 아니라 부드럽게 곡선 변환되었는지 검증
-        assert.ok(result.tree_density < 0.95, "❌ 소프트 클램프 스무딩이 적용되지 않았습니다.");
-        console.log(`✅ Test 2 성공: 한계치 근접 데이터 스무딩 필터링 완료 (원본 0.95 -> 보정치 ${result.tree_density.toFixed(3)})`);
+        assert.ok(result.base_environment.tree_density < 0.95, "❌ 소프트 클램프 스무딩이 적용되지 않았습니다.");
+        console.log(`✅ Test 2 성공: 한계치 근접 데이터 스무딩 필터링 완료 (원본 0.95 -> 보정치 ${result.base_environment.tree_density.toFixed(3)})`);
     } catch (err) {
         console.error("❌ Test 2 실패:", err.message);
     }
@@ -97,6 +98,27 @@ function runAdvancedTests() {
         console.log(`✅ Test 4 성공: spawn/goal 누락 시 자동 보강 완료 (areas 개수: ${result.areas.length})`);
     } catch (err) {
         console.error("❌ Test 4 실패:", err.message);
+    }
+
+    // Test 5: 언리얼 ApplyZoneJsonString()이 실제로 기대하는 최상위 스키마 검증
+    // (base_environment / main_path 하위 중첩 - 최상위에 tree_density 등이 평평하게
+    //  있으면 언리얼 쪽 TryGetObjectField가 실패해서 파싱이 통째로 깨진다. 과거 버전에서
+    //  이 부분이 flat 구조였던 게 발견되어 고쳐졌으므로, 회귀 방지용으로 스키마를 고정한다.)
+    try {
+        const result = validatePCGParams(null); // defaultZone() 경로도 같이 검증
+        assert.ok(result.base_environment && typeof result.base_environment === "object", "❌ base_environment 객체가 없음");
+        assert.ok(result.main_path && typeof result.main_path === "object", "❌ main_path 객체가 없음");
+        assert.ok(typeof result.base_environment.tree_density === "number", "❌ base_environment.tree_density 누락");
+        assert.ok(Array.isArray(result.main_path.normalized_points), "❌ main_path.normalized_points 누락");
+        assert.ok(result.tree_density === undefined, "❌ 최상위에 tree_density가 평평하게 남아있음 (언리얼 파싱 실패 원인)");
+        assert.ok(result.normalized_points === undefined, "❌ 최상위에 normalized_points가 평평하게 남아있음");
+
+        const withInput = validatePCGParams({ tree_density: 0.5, areas: [] });
+        assert.ok(withInput.base_environment && typeof withInput.base_environment.tree_density === "number", "❌ 입력이 있을 때도 base_environment 중첩이 유지되어야 함");
+
+        console.log("✅ Test 5 성공: 최상위 스키마가 언리얼 계약(base_environment/main_path 중첩)과 일치함");
+    } catch (err) {
+        console.error("❌ Test 5 실패:", err.message);
     }
 }
 
