@@ -32,7 +32,16 @@ const validatePCGParams = (aiData) => {
     },
     path_width: { min: 100, max: 1500, def: 500 },
     points_count: { min: 2, max: 8, def_length: 2 },
-    radius: { min: 0.01, max: 0.30, def: 0.05 }
+    radius: { min: 0.01, max: 0.30, def: 0.05 },
+    // LLM이 아직 안 붙었거나 normalized_points를 안 보냈을 때 쓰는 기본 경로.
+    // README에 적어둔 연동 예시와 동일한 값으로 맞춰서, pcg_json 없이 테스트해도
+    // 직선 한 줄이 아니라 자연스럽게 꺾이는 경로 + spawn/combat/goal이 다 보이는
+    // 데모용 존이 나오게 함 (일직선 2점짜리는 시연할 때 밋밋해서 개선함)
+    default_path_points: [
+      { x: 0.05, y: 0.6 },
+      { x: 0.5, y: 0.45 },
+      { x: 0.95, y: 0.5 }
+    ]
   };
 
   // 언리얼 ParseAreaType() 기준 (spawn/combat/goal/danger). 다른 문자열은 전부 combat으로 보정.
@@ -52,11 +61,12 @@ const validatePCGParams = (aiData) => {
     main_path: {
       path_type: CONFIG.path_type,
       path_width: CONFIG.path_width.def,
-      normalized_points: [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }]
+      normalized_points: CONFIG.default_path_points
     },
     areas: [
-      { area_type: "spawn", normalized_center: { x: 0.1, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
-      { area_type: "goal", normalized_center: { x: 0.9, y: 0.5 }, normalized_radius: 0.06, detail_density: 0.4 }
+      { area_type: "spawn", normalized_center: { x: 0.12, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
+      { area_type: "combat", normalized_center: { x: 0.45, y: 0.55 }, normalized_radius: 0.10, detail_density: 0.6 },
+      { area_type: "goal", normalized_center: { x: 0.85, y: 0.48 }, normalized_radius: 0.06, detail_density: 0.4 }
     ]
   });
 
@@ -106,7 +116,7 @@ const validatePCGParams = (aiData) => {
       y: finalClamp(safeNumber(pt && pt.y, 0.5), 0.0, 1.0)
     }));
   } else {
-    validated.main_path.normalized_points = [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }];
+    validated.main_path.normalized_points = CONFIG.default_path_points;
   }
 
   // 5. 구역(Areas) 데이터 보정
@@ -139,7 +149,7 @@ const validatePCGParams = (aiData) => {
   if (!hasType("spawn")) {
     validated.areas.unshift({
       area_type: "spawn",
-      normalized_center: { x: 0.1, y: 0.5 },
+      normalized_center: { x: 0.12, y: 0.5 },
       normalized_radius: CONFIG.radius.def,
       detail_density: 0.2
     });
@@ -147,7 +157,7 @@ const validatePCGParams = (aiData) => {
   if (!hasType("goal")) {
     validated.areas.push({
       area_type: "goal",
-      normalized_center: { x: 0.9, y: 0.5 },
+      normalized_center: { x: 0.85, y: 0.48 },
       normalized_radius: CONFIG.radius.def,
       detail_density: 0.4
     });
