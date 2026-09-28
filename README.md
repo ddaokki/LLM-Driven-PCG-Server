@@ -36,6 +36,10 @@ curl http://127.0.0.1:8000/health
 # {"status":"running"}
 ```
 
+> ℹ️ Redis가 안 떠 있으면 콘솔에 `Redis Client Error ... ECONNREFUSED` 로그가 반복해서 찍히는데,
+> `/generate-zone`(언리얼 연동용)이나 `/health`만 테스트할 거라면 무시해도 됩니다 — Redis는
+> `/api/chat/send`, `/api/world/generate`처럼 대화 세션을 다루는 내부용 엔드포인트에만 필요합니다.
+
 ## 언리얼 클라이언트 연결 방법
 
 ### 1. 계약(Contract) 요약
