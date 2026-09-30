@@ -120,6 +120,33 @@ function runAdvancedTests() {
     } catch (err) {
         console.error("❌ Test 5 실패:", err.message);
     }
+
+    // Test 6: combat_count 옵션 - LLM 미연동 상태에서도 combat 구역 개수를 가변으로
+    // 생성할 수 있는지 검증 (강지석 님 리포트: "전투구역이 시작-전투-끝 3개로 고정되는 것
+    // 같다" -> areas 배열 자체는 가변 길이를 지원하지만, pcg_json 없이 호출할 때 쓰는
+    // 기본 존이 원래 combat 1개짜리였던 게 원인이었음. combat_count로 재현/검증한다.)
+    try {
+        const zeroInput = validatePCGParams(null); // 옵션 없으면 기존과 동일 (combat 1개)
+        const zeroCombat = zeroInput.areas.filter(a => a.area_type === "combat").length;
+        assert.equal(zeroCombat, 1, `❌ combat_count 미지정 시 기존 동작(combat 1개)이 깨짐: ${zeroCombat}`);
+
+        const multi = validatePCGParams(null, { combatCount: 3 });
+        const multiCombat = multi.areas.filter(a => a.area_type === "combat").length;
+        assert.equal(multiCombat, 3, `❌ combat_count=3 지정 시 combat 구역이 3개 생성되지 않음: ${multiCombat}`);
+        assert.equal(multi.areas[0].area_type, "spawn", "❌ combat_count 지정 시에도 spawn이 첫 구역이어야 함");
+        assert.equal(multi.areas[multi.areas.length - 1].area_type, "goal", "❌ combat_count 지정 시에도 goal이 마지막 구역이어야 함");
+        assert.equal(multi.areas.length, 5, `❌ areas 총 개수가 예상(spawn+combat3+goal=5)과 다름: ${multi.areas.length}`);
+
+        const zero = validatePCGParams(null, { combatCount: 0 });
+        const zeroLen = zero.areas.filter(a => a.area_type === "combat").length;
+        assert.equal(zeroLen, 0, `❌ combat_count=0 지정 시 combat 구역이 0개여야 함: ${zeroLen}`);
+        assert.ok(zero.areas.some(a => a.area_type === "spawn") && zero.areas.some(a => a.area_type === "goal"),
+            "❌ combat_count=0이어도 spawn/goal은 유지되어야 함");
+
+        console.log(`✅ Test 6 성공: combat_count 옵션으로 combat 구역 개수 가변 생성 확인 (0개/1개(기본)/3개)`);
+    } catch (err) {
+        console.error("❌ Test 6 실패:", err.message);
+    }
 }
 
 runAdvancedTests();

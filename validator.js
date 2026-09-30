@@ -18,7 +18,7 @@ const softClamp = (val, max = 1.0) => {
   return max * Math.tanh(val / max);
 };
 
-const validatePCGParams = (aiData) => {
+const validatePCGParams = (aiData, options = {}) => {
   // 1. 클라이언트(병욱) 요구사항 기반 도메인 제약 조건 정의
   const CONFIG = {
     theme: "forest",
@@ -51,27 +51,53 @@ const validatePCGParams = (aiData) => {
   // base_environment / main_path 하위 객체에서 읽는다 (PCGZoneController.cpp
   // TryGetObjectField(TEXT("base_environment")/"main_path") 참고). 최상위에
   // 평평하게 내려주면 파싱 자체가 실패(및 false 반환)하므로 반드시 중첩시켜야 함.
-  const defaultZone = () => ({
-    theme: CONFIG.theme,
-    base_environment: {
-      tree_density: CONFIG.density.tree.def,
-      rock_density: CONFIG.density.rock.def,
-      grass_density: CONFIG.density.grass.def
-    },
-    main_path: {
-      path_type: CONFIG.path_type,
-      path_width: CONFIG.path_width.def,
-      normalized_points: CONFIG.default_path_points
-    },
-    areas: [
-      { area_type: "spawn", normalized_center: { x: 0.12, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
-      { area_type: "combat", normalized_center: { x: 0.45, y: 0.55 }, normalized_radius: 0.10, detail_density: 0.6 },
-      { area_type: "goal", normalized_center: { x: 0.85, y: 0.48 }, normalized_radius: 0.06, detail_density: 0.4 }
-    ]
-  });
+  //
+  // combatCount: LLM API가 아직 /generate-zone에 붙지 않아서(README 참고) dialogue를
+  // 실제로 해석하지 못하는 동안에도, "전투 구역이 여러 개 생성되는" 시나리오를 데모/검증할
+  // 수 있게 하는 옵션. 기본값 1(spawn+combat 1개+goal = 총 3개, 기존 동작과 동일)이며,
+  // 값을 늘리면 combat 구역을 그만큼 경로상에 고르게 배치한 존을 반환한다.
+  // (강지석/최병욱 공유: "전투구역이 시작-전투-끝 3개로 고정된다"는 건 이 데모 존이 원래
+  // combat 1개짜리였기 때문이지, areas 배열 자체에 개수 제한이 걸려있던 건 아니다 - 아래
+  // 5번 "구역(Areas) 데이터 보정" 로직은 원래부터 aiData.areas 길이를 그대로 통과시킨다.)
+  const defaultZone = (combatCount = 1) => {
+    const safeCombatCount = Math.max(0, Math.min(Math.round(safeNumber(combatCount, 1)), CONFIG.points_count.max));
+
+    const combatAreas = [];
+    for (let i = 0; i < safeCombatCount; i++) {
+      // spawn(0.12)과 goal(0.85) 사이 구간에 combat 구역들을 고르게 분산 배치
+      const t = safeCombatCount === 1 ? 0.5 : (i + 1) / (safeCombatCount + 1);
+      const x = parseFloat((0.12 + t * (0.85 - 0.12)).toFixed(3));
+      const y = parseFloat((0.5 + (i % 2 === 0 ? -0.05 : 0.05)).toFixed(3));
+      combatAreas.push({
+        area_type: "combat",
+        normalized_center: { x, y },
+        normalized_radius: 0.10,
+        detail_density: 0.6
+      });
+    }
+
+    return {
+      theme: CONFIG.theme,
+      base_environment: {
+        tree_density: CONFIG.density.tree.def,
+        rock_density: CONFIG.density.rock.def,
+        grass_density: CONFIG.density.grass.def
+      },
+      main_path: {
+        path_type: CONFIG.path_type,
+        path_width: CONFIG.path_width.def,
+        normalized_points: CONFIG.default_path_points
+      },
+      areas: [
+        { area_type: "spawn", normalized_center: { x: 0.12, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
+        ...combatAreas,
+        { area_type: "goal", normalized_center: { x: 0.85, y: 0.48 }, normalized_radius: 0.06, detail_density: 0.4 }
+      ]
+    };
+  };
 
   if (!aiData) {
-    return defaultZone();
+    return defaultZone(options.combatCount);
   }
 
   const validated = { base_environment: {}, main_path: {} };

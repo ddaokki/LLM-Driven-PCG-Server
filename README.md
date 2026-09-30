@@ -91,10 +91,29 @@ Content-Type: application/json
 
 > ℹ️ **현재 상태**: `/generate-zone`은 구현되어 있지만, 아직 LLM API가 붙지 않아서 `dialogue` 내용을
 > 실제로 해석하지는 않습니다. 요청 body에 `pcg_json`(LLM이 낼 법한 원본 포맷)을 같이 보내면 그걸
-> validator로 보정해서 돌려주고, 안 보내면 기본 존(spawn+goal만 있는 안전한 forest 존)을 반환합니다.
-> 즉 지금도 "테스트 JSON 넘기고 언리얼에서 실제로 구역이 생성되는지" 시연은 바로 가능하고,
+> validator로 보정해서 돌려주고, 안 보내면 기본 존(spawn+combat 1개+goal 구성의 안전한 forest 존)을
+> 반환합니다. 즉 지금도 "테스트 JSON 넘기고 언리얼에서 실제로 구역이 생성되는지" 시연은 바로 가능하고,
 > LLM 파트가 API로 노출되면 `app.js`의 TODO 주석 위치에서 `dialogue -> LLM 호출 -> pcg_json`으로
 > 바꿔 끼우면 됩니다.
+
+> ⚠️ **"전투 구역이 시작-전투-끝 3개로 고정되는 것 같다"는 리포트 관련 (2026-09-30)**:
+> 확인 결과 `validator.js`의 `areas` 보정 로직 자체는 개수 제한이 없고, LLM이 몇 개를 보내든
+> (`pcg_json.areas`) 그대로 통과시킵니다 (spawn/goal 최소 1개 보장 로직만 있음 — `test_validator.js`
+> Test 3/4/6 참고). "고정 3개(=combat 1개)"로 보였던 건 **LLM API가 아직 `/generate-zone`에
+> 연결되지 않아서**, `pcg_json` 없이 호출할 때 항상 같은 기본 존(combat 1개)이 나왔기 때문입니다.
+> 이번에 `combat_count`(선택, 정수) 파라미터를 추가해서, LLM 없이도 combat 구역 개수가 가변이라는
+> 걸 바로 확인할 수 있게 했습니다:
+> ```bash
+> curl -X POST http://127.0.0.1:8000/generate-zone \
+>   -H "Content-Type: application/json" \
+>   -d '{"combat_count": 3}'
+> # areas: [spawn, combat, combat, combat, goal] (총 5구역)
+> ```
+> 다만 **언리얼 쪽 `APCGZoneController::ApplyAreaPCG()`는 `CurrentZoneData.Areas.Num()`이 레벨에
+> 미리 배치된 `AreaPCGActors` 개수와 정확히 같아야만** 구역을 적용합니다 (다르면 경고 로그만 찍고
+> 전체를 스킵). 그래서 백엔드가 몇 개를 보내든 해당 레벨에 그 개수만큼 Area 액터가 미리 배치돼
+> 있어야 실제로 반영됩니다 — 이 부분은 레벨/언리얼 쪽에서 맞춰야 하는 부분이라 백엔드 코드로는
+> 해결할 수 없고, 팀에 공유가 필요합니다.
 
 ### 2. 로컬에서 붙여보기 (Unreal 없이 먼저 확인)
 
@@ -131,7 +150,7 @@ curl -X POST http://127.0.0.1:8000/generate-zone \
 | Method | Path | 설명 |
 |---|---|---|
 | GET | `/health` | 서버 상태 확인 |
-| POST | `/generate-zone` | 언리얼 클라이언트용 — dialogue(+옵션 `pcg_json`)를 받아 Zone JSON을 그대로 반환. LLM 미연동 상태라 `pcg_json` 없으면 기본 존 반환 |
+| POST | `/generate-zone` | 언리얼 클라이언트용 — dialogue(+옵션 `pcg_json`, `combat_count`)를 받아 Zone JSON을 그대로 반환. LLM 미연동 상태라 `pcg_json` 없으면 기본 존 반환 (`combat_count`로 combat 구역 개수 조절 가능) |
 | POST | `/api/chat/send` | (내부용) 대화 적재 및 세션 컨텍스트 반환 — Redis 필요 |
 | POST | `/api/world/generate` | (내부용) LLM 원본 출력(`llmResult`)을 받아 검증/보정 |
 

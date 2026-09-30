@@ -25,16 +25,23 @@ app.get("/health", (req, res) => {
  *    (있다면) 테스트용 pcg_json을 validator에 통과시키고, 없으면 기본 존을 반환한다.
  *    -> "테스트 JSON 넘기고 작동 확인" 수준의 실연동 시연에는 이걸로 충분하고,
  *       LLM API가 붙으면 dialogue -> LLM 호출 -> pcg_json 로 교체하면 된다.
+ *
+ *    [2026-09-30] combat_count(선택, 정수) 추가: pcg_json 없이 호출할 때 기본 존의
+ *    combat 구역 개수를 지정할 수 있다. LLM이 아직 안 붙어서 dialogue 내용대로
+ *    "전투 구역 여러 개"를 실제로 생성해볼 방법이 없었는데, 이 옵션으로 최소한
+ *    /generate-zone 계약 자체는 combat 구역 개수가 가변이라는 걸 언리얼 쪽에서
+ *    바로 확인할 수 있다. (예: {"combat_count": 3}) 안 보내면 기존과 동일하게
+ *    combat 1개(총 3구역)짜리 데모 존을 반환한다.
  */
 app.post("/generate-zone", (req, res) => {
   try {
-    const { dialogue, pcg_json } = req.body || {};
+    const { dialogue, pcg_json, combat_count } = req.body || {};
     if (dialogue !== undefined && !Array.isArray(dialogue)) {
       return res.status(400).json({ error: "dialogue는 배열이어야 합니다." });
     }
 
     // TODO(LLM API 연동 후): dialogue를 LLM 파이프라인에 넘겨 pcg_json을 실시간 생성
-    const validated = validatePCGParams(pcg_json || null);
+    const validated = validatePCGParams(pcg_json || null, { combatCount: combat_count });
     res.json(validated);
   } catch (error) {
     console.error("Generate Zone Error:", error);
