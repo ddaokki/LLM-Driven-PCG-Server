@@ -33,6 +33,12 @@ const validatePCGParams = (aiData, options = {}) => {
     path_width: { min: 100, max: 1500, def: 500 },
     points_count: { min: 2, max: 8, def_length: 2 },
     radius: { min: 0.01, max: 0.30, def: 0.05 },
+    // 구역 간 최소 x 간격(정규화 좌표 기준). "구역 배열 순서 일치" 요구사항(요구사항
+    // 분석서 백엔드 비기능요구사항 참고: areas[0]=Spawn/areas[1]=Combat/areas[2]=Goal처럼
+    // 언리얼이 배열 인덱스로 Area PCG Actor를 매칭)을 만족시키려면, 단순히 인덱스만
+    // 맞추는 게 아니라 "배열 순서 = 경로상 실제 위치 순서"까지 보장해야 실제 레벨에서도
+    // 의미가 맞는다. 이 값보다 가까우면 스포너/마커가 겹쳐 보이므로 최소 간격을 강제한다.
+    min_area_gap: 0.06,
     // LLM이 아직 안 붙었거나 normalized_points를 안 보냈을 때 쓰는 기본 경로.
     // README에 적어둔 연동 예시와 동일한 값으로 맞춰서, pcg_json 없이 테스트해도
     // 직선 한 줄이 아니라 자연스럽게 꺾이는 경로 + spawn/combat/goal이 다 보이는
@@ -188,6 +194,56 @@ const validatePCGParams = (aiData, options = {}) => {
       detail_density: 0.4
     });
   }
+
+  // 7. [2차 고도화] 공간적 순서 일치 보정 (Spatial Ordering)
+  //    1학기 버전은 LLM이 준 areas 배열 순서를 그대로 통과시켰는데, 이러면 언리얼의
+  //    "배열 인덱스 = Area PCG Actor 인덱스" 매칭(PCGZoneController.cpp ApplyAreaPCG)
+  //    특성상, LLM이 순서를 뒤섞어 보내면 실제로는 경로 뒤쪽에 있어야 할 구역이 앞쪽
+  //    액터 자리에 매칭되는 등 "배열 순서"와 "경로상 실제 위치"가 어긋날 수 있었다.
+  //    spawn을 항상 맨 앞, goal을 항상 맨 뒤로 고정하고, 나머지(combat/danger)는
+  //    경로 진행 방향(정규화 x 좌표 오름차순)으로 정렬해서 두 순서를 강제로 일치시킨다.
+  const spawnAreas = validated.areas.filter(a => a.area_type === "spawn");
+  const goalAreas = validated.areas.filter(a => a.area_type === "goal");
+  const middleAreas = validated.areas
+    .filter(a => a.area_type !== "spawn" && a.area_type !== "goal")
+    .sort((a, b) => a.normalized_center.x - b.normalized_center.x);
+  validated.areas = [...spawnAreas, ...middleAreas, ...goalAreas];
+
+  // 8. [2차 고도화] 최소 간격 보정 (Minimum Spacing Enforcement)
+  //    정렬은 순서만 바로잡을 뿐, LLM이 같은 x 좌표 근처에 구역을 몰아서 보내면
+  //    Combat 스포너나 마커가 서로 겹쳐 보일 수 있다. 정렬된 순서를 그대로 유지한 채
+  //    (LLM이 의도한 상대적 배치 의도는 보존) 인접 구역과의 간격이 min_area_gap보다
+  //    좁으면 뒤 구역을 부드럽게 밀어내는 방식으로만 벌린다 (앞 구역 위치는 건드리지 않음).
+  for (let i = 1; i < validated.areas.length; i++) {
+    const prevX = validated.areas[i - 1].normalized_center.x;
+    const currX = validated.areas[i].normalized_center.x;
+    if (currX - prevX < CONFIG.min_area_gap) {
+      validated.areas[i] = {
+        ...validated.areas[i],
+        normalized_center: {
+          ...validated.areas[i].normalized_center,
+          x: finalClamp(prevX + CONFIG.min_area_gap, 0.0, 1.0)
+        }
+      };
+    }
+  }
+
+  // 9. [2차 고도화] 반지름-간격 정합성 보정
+  //    구역 반지름이 실제 인접 구역까지의 거리보다 크면 원(Area) 표시가 서로 겹쳐
+  //    보이므로, 좌우 인접 구역까지 거리의 절반을 넘지 않도록 한 번 더 clamp한다.
+  //    (radius.min은 최소 보장선으로 유지 - 완전히 0으로 짜부라지지 않게)
+  validated.areas = validated.areas.map((area, i) => {
+    const gaps = [];
+    if (i > 0) gaps.push(area.normalized_center.x - validated.areas[i - 1].normalized_center.x);
+    if (i < validated.areas.length - 1) gaps.push(validated.areas[i + 1].normalized_center.x - area.normalized_center.x);
+    if (gaps.length === 0) return area;
+
+    const maxAllowedRadius = Math.max(Math.min(...gaps) / 2, CONFIG.radius.min);
+    return {
+      ...area,
+      normalized_radius: Math.min(area.normalized_radius, maxAllowedRadius)
+    };
+  });
 
   return validated;
 };

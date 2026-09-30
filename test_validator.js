@@ -52,9 +52,10 @@ function runAdvancedTests() {
     }
 
     // Test 3: area_type 화이트리스트 검증 (언리얼 ParseAreaType 기준 spawn/combat/goal/danger)
+    // 주의: 2차 업데이트로 areas는 spawn-맨앞/goal-맨뒤/나머지는 x좌표 오름차순으로
+    // 재정렬되므로(Test 7 참고), 여기서는 "타입이 올바르게 보정되는지"만 개수/포함 여부로
+    // 확인하고, 정확한 배열 위치 검증은 Test 7에서 별도로 한다.
     try {
-        // start_zone/boss_zone(옛 문자열)에 더해 spawn/goal도 하나씩 포함시켜서
-        // "플레이 가능성 자동 보강" 로직이 끼어들어 순서를 바꾸지 않게 고정한다.
         const weirdAreaData = {
             areas: [
                 { area_type: "spawn", normalized_center: { x: 0.05, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
@@ -65,14 +66,15 @@ function runAdvancedTests() {
             ],
         };
         const result = validatePCGParams(weirdAreaData);
+        const types = result.areas.map(a => a.area_type);
 
         // 예전 문자열(start_zone/boss_zone)은 화이트리스트에 없으므로 combat으로 보정되어야 함
-        assert.equal(result.areas[1].area_type, "combat", "❌ start_zone이 combat으로 보정되지 않음");
-        assert.equal(result.areas[2].area_type, "combat", "❌ boss_zone이 combat으로 보정되지 않음");
+        // -> combat이 정확히 2개(start_zone, boss_zone 보정분) 있어야 함
+        assert.equal(types.filter(t => t === "combat").length, 2, `❌ start_zone/boss_zone이 combat으로 보정되지 않음: ${types}`);
         // 화이트리스트에 있는 spawn/danger/goal은 그대로 유지되어야 함
-        assert.equal(result.areas[0].area_type, "spawn", "❌ 유효한 spawn 타입이 변형됨");
-        assert.equal(result.areas[3].area_type, "danger", "❌ 유효한 danger 타입이 변형됨");
-        assert.equal(result.areas[4].area_type, "goal", "❌ 유효한 goal 타입이 변형됨");
+        assert.equal(types.filter(t => t === "spawn").length, 1, "❌ 유효한 spawn 타입이 사라짐/중복됨");
+        assert.equal(types.filter(t => t === "danger").length, 1, "❌ 유효한 danger 타입이 변형됨");
+        assert.equal(types.filter(t => t === "goal").length, 1, "❌ 유효한 goal 타입이 변형됨");
         // 이미 spawn/goal이 있으므로 자동 보강이 끼어들어 개수가 늘어나면 안 됨
         assert.equal(result.areas.length, 5, `❌ areas 개수가 예상과 다름: ${result.areas.length}`);
 
@@ -146,6 +148,56 @@ function runAdvancedTests() {
         console.log(`✅ Test 6 성공: combat_count 옵션으로 combat 구역 개수 가변 생성 확인 (0개/1개(기본)/3개)`);
     } catch (err) {
         console.error("❌ Test 6 실패:", err.message);
+    }
+
+    // Test 7: [2차 고도화] 공간적 순서 일치 보정 (요구사항 분석서 "구역 배열 순서 일치"
+    // 항목 대응). LLM이 areas를 순서 없이(goal을 맨 앞, combat들을 뒤섞어서) 보내도,
+    // 응답에서는 spawn이 항상 맨 앞/goal이 항상 맨 뒤/나머지는 x좌표 오름차순으로
+    // 재정렬되어야 언리얼의 "배열 인덱스=Area Actor 인덱스" 매칭과 실제 위치가 맞는다.
+    try {
+        const scrambledData = {
+            areas: [
+                { area_type: "goal", normalized_center: { x: 0.9, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.4 },
+                { area_type: "combat", normalized_center: { x: 0.7, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.6 },
+                { area_type: "spawn", normalized_center: { x: 0.1, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
+                { area_type: "combat", normalized_center: { x: 0.3, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.6 },
+            ],
+        };
+        const result = validatePCGParams(scrambledData);
+        const xs = result.areas.map(a => a.normalized_center.x);
+
+        assert.equal(result.areas[0].area_type, "spawn", "❌ spawn이 배열 맨 앞으로 정렬되지 않음");
+        assert.equal(result.areas[result.areas.length - 1].area_type, "goal", "❌ goal이 배열 맨 뒤로 정렬되지 않음");
+        // x좌표가 항상 오름차순(비내림차순)이어야 함 = 배열 순서와 경로상 위치 순서 일치
+        for (let i = 1; i < xs.length; i++) {
+            assert.ok(xs[i] >= xs[i - 1] - 1e-9, `❌ areas가 x좌표 오름차순으로 정렬되지 않음: ${xs}`);
+        }
+
+        console.log(`✅ Test 7 성공: 뒤섞인 areas가 spawn-맨앞/goal-맨뒤/x좌표 오름차순으로 재정렬됨 (x: ${xs.map(x => x.toFixed(2))})`);
+    } catch (err) {
+        console.error("❌ Test 7 실패:", err.message);
+    }
+
+    // Test 8: [2차 고도화] 최소 간격 보정. LLM이 combat 두 개를 거의 같은 위치(x=0.501,
+    // x=0.5)에 보내면, 두 스포너가 시각적으로 겹치지 않도록 min_area_gap(0.06)만큼
+    // 최소 간격이 강제로 벌어져야 한다.
+    try {
+        const crowdedData = {
+            areas: [
+                { area_type: "spawn", normalized_center: { x: 0.1, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
+                { area_type: "combat", normalized_center: { x: 0.5, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.6 },
+                { area_type: "combat", normalized_center: { x: 0.501, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.6 },
+                { area_type: "goal", normalized_center: { x: 0.9, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.4 },
+            ],
+        };
+        const result = validatePCGParams(crowdedData);
+        const gap = result.areas[2].normalized_center.x - result.areas[1].normalized_center.x;
+
+        assert.ok(gap >= 0.06 - 1e-9, `❌ 인접 combat 구역 간 최소 간격(0.06)이 보장되지 않음: gap=${gap.toFixed(4)}`);
+
+        console.log(`✅ Test 8 성공: 인접 구역 최소 간격 보정 확인 (보정 후 간격: ${gap.toFixed(3)})`);
+    } catch (err) {
+        console.error("❌ Test 8 실패:", err.message);
     }
 }
 
