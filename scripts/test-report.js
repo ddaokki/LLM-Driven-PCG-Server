@@ -25,6 +25,7 @@ const SECTIONS = [
   ["llmClient.test.js", "기능 테스트 — LLM 클라이언트/폴백 (LLM-xx, 명세 '후속 테스트: 호출 실패·시간 초과 시 기본 Zone')"],
   ["unrealMock.test.js", "계약 테스트 — 언리얼 ApplyZoneJsonString 목 파서 (명세 BE-T10, UE-MOCK-xx)"],
   ["api.test.js", "통합/비기능 테스트 — HTTP 엔드포인트, Redis 장애 허용 (명세 4.2 BE-T06~T09, T11 + 신규 T13~T17)"],
+  ["apiVllm.test.js", "통합 테스트 — vLLM 경로(가짜 vLLM 서버)에서 combat_count 강제 (BE-T18)"],
   ["session.test.js", "통합 테스트 — Redis 세션 슬라이딩 윈도우 (SESSION-xx, Redis 있을 때만)"],
 ];
 
