@@ -27,6 +27,8 @@ let client = null;
 let ready = false;
 let lastLoggedState = null;
 let connectPromise = null;
+let lastFailAt = 0;
+const RETRY_BACKOFF_MS = 10000; // 연결 실패 후 이 시간 동안은 재시도하지 않음 (요청마다 1.5초씩 기다리는 것 방지)
 
 const logState = (state, detail) => {
   if (lastLoggedState === state) return;
@@ -53,8 +55,9 @@ function getClient() {
 
 /** 연결 시도(여러 호출이 겹쳐도 한 번만). 성공 여부를 돌려주고 절대 throw하지 않음. */
 async function ensureConnected() {
+  if (ready && client && client.isOpen) return true;
+  if (!connectPromise && Date.now() - lastFailAt < RETRY_BACKOFF_MS) return false;
   const c = getClient();
-  if (ready && c.isOpen) return true;
   if (!connectPromise) {
     connectPromise = (async () => {
       try {
@@ -63,7 +66,7 @@ async function ensureConnected() {
         if (ready) logState("up");
         return ready;
       } catch (err) {
-        ready = false;
+        ready = false; lastFailAt = Date.now();
         logState("down", err && (err.code || err.message));
         // 실패한 클라이언트는 버리고 다음 호출 때 새로 만든다 (redis v4는 실패한 connect 재사용이 불안정)
         try { if (c.isOpen) await c.disconnect(); } catch (_) { /* ignore */ }
@@ -79,8 +82,9 @@ async function ensureConnected() {
 
 const isAvailable = () => ready && !!client && client.isOpen;
 
-/** 테스트/기동용: ms 안에 연결되면 true */
+/** 테스트/기동용: ms 안에 연결되면 true (백오프 무시하고 즉시 시도) */
 async function waitUntilReady(ms = 1500) {
+  lastFailAt = 0;
   const p = ensureConnected();
   const t = new Promise((resolve) => setTimeout(() => resolve(false), ms));
   return Promise.race([p, t]);
