@@ -263,3 +263,16 @@ test("타입 오염: 문자열/NaN/null/배열 아님 → 예외 없이 유효�
   const z2 = validatePCGParams({ areas: [null, 1, "s", { area_type: "combat", normalized_center: "x" }] });
   expectInvariants(z2);
 });
+
+test("V3-16 처음에 겹쳐 있던 큰 combat들은 간격 확보 후 반지름이 과도하게 줄지 않음(최종 위치 기준 축소)", () => {
+  const z = validatePCGParams({
+    main_path: { normalized_points: pts([0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]) },
+    areas: [
+      area("spawn", 0.1, 0.1), area("combat", 0.52, 0.5, 0.3, 0.9), area("combat", 0.5, 0.52, 0.3, 0.2), area("goal", 0.1, 0.9),
+    ],
+  });
+  const cs = combats(z);
+  assert.equal(cs.length, 2);
+  for (const c of cs) assert.ok(c.normalized_radius >= 0.05, `radius too small: ${c.normalized_radius}`);
+  expectInvariants(z);
+});

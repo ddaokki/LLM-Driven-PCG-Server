@@ -74,7 +74,9 @@ const detectCombatCount = (text) => {
   const digit = text.match(/(\d+)\s*(번|회|개|차례|군데|곳|times?|fights?|battles?|combats?)/i) || (hasCombatWord && text.match(/(\d+)/));
   if (digit) return Math.min(parseInt(digit[1], 10), MAX_COMBAT);
   if (hasCombatWord) {
-    const kor = text.match(/(한|하나|두|둘|세|셋|네|넷|다섯|여섯|일곱|여덟)\s*(번|개|차례|군데|곳|마리|의)?/);
+    // 한글 수사는 단위(번/개/차례…)가 붙은 경우만 인정 - "격렬한"의 "한", "세상"의 "세" 같은 오인 방지.
+    // "하나/둘/셋/넷"은 단위 없이도 단독 어절이면 인정 ("전투 하나").
+    const kor = text.match(/(한|두|세|네|다섯|여섯|일곱|여덟)\s*(번|개|차례|군데|곳|마리|차)/) || text.match(/(?:^|\s)(하나|둘|셋|넷)(?=\s|$|[,.!?])/);
     if (kor && KOREAN_NUMERALS[kor[1]]) return Math.min(KOREAN_NUMERALS[kor[1]], MAX_COMBAT);
     const eng = text.match(/\b(one|two|three|four|five|six)\b/i);
     if (eng) return ENGLISH_NUMERALS[eng[1].toLowerCase()];

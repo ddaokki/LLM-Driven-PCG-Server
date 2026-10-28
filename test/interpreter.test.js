@@ -104,3 +104,9 @@ test("RULE-12 후보 자체가 validator를 거의 안 거치게 생성됨(평�
   }
   assert.ok(total / 100 < 2, `avg corrections ${total / 100}`);
 });
+
+test("RULE-13 '격렬한 큰 전투 두 번' → 2 ('격렬한'의 '한'을 수사로 오인하지 않음)", () => {
+  assert.equal(interpretDialogue(dlg("?", "눈 덮인 설원에서 보스급으로 격렬한 큰 전투 두 번")).combatCount, 2);
+  assert.equal(interpretDialogue(dlg("?", "조용한 숲에서 전투 하나")).combatCount, 1);
+  assert.equal(interpretDialogue(dlg("?", "위험한 숲")).combatCount, 1, "수사 없음 → 기본 1");
+});

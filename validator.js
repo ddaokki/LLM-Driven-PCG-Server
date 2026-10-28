@@ -369,7 +369,9 @@ function layoutAreas(areas, pathPts, rep) {
   if (farBefore) rep.hard("layout", `경로에서 먼 구역 ${farBefore}개(가장자리 거리 > ${CONFIG.combat_gap_max})`);
   if (overlapBefore) rep.hard("layout", `구역 원 겹침 ${overlapBefore}쌍`);
 
-  // 경로 좌표계로 변환
+  // 경로 좌표계로 변환. radius0 = 입력 반지름(상한): 반지름은 "최종 위치에서 겹치지 않는 최대값"과 radius0 중
+  // 작은 쪽으로 정해진다(위치가 벌어지면 다시 커질 수 있음 → 일시적 겹침으로 영구히 작아지는 일 없음).
+  for (const a of areas) a.radius0 = a.radius;
   for (const a of middle) {
     const pr = g.projectToPolyline(a, pathPts);
     a.t = pr.t;
@@ -385,7 +387,7 @@ function layoutAreas(areas, pathPts, rep) {
     const b2 = g.pointAtProgress(pathPts, a.t);
     a.off = { x: a.x - b2.x, y: a.y - b2.y };
   };
-  for (let iter = 0; iter < 20; iter++) {
+  for (let iter = 0; iter < 40; iter++) {
     let changed = false;
     middle.sort((p, q) => p.t - q.t);
 
@@ -424,22 +426,27 @@ function layoutAreas(areas, pathPts, rep) {
       }
     }
 
-    // (c) 반지름 정합성: 가장 가까운 이웃 중심 거리의 절반(여유 포함) → 겹침 0
+    // (c) 반지름 최소값으로도 겹치는 거리(중심 간 < 0.03)면 뒤 구역의 간격 요구를 늘려 다시 푼다
     const chain = [spawn, ...middle, goal];
-    for (let i = 0; i < chain.length; i++) {
-      let dmin = Infinity;
-      for (let j = 0; j < chain.length; j++) if (j !== i) dmin = Math.min(dmin, g.dist(chain[i], chain[j]));
-      const maxR = Math.max((dmin - CONFIG.circle_pad) / 2, CONFIG.radius.min);
-      if (chain[i].radius > maxR + TOL) { chain[i].radius = round(maxR); shrunk++; changed = true; }
-    }
-
-    // (d) 반지름 최소값으로도 겹치는 거리(중심 간 < 0.03)면 뒤 구역의 간격 요구를 늘려 다시 푼다
     for (let i = 1; i < chain.length; i++) {
       if (g.dist(chain[i - 1], chain[i]) < minCenterDist - TOL && chain[i] !== goal) {
         extraGap.set(chain[i], (extraGap.get(chain[i]) || 0) + gap); changed = true;
       }
     }
-    if (!changed) break;
+    if (changed) continue;
+
+    // (d) 위치가 안정된 뒤에만 반지름 정합성 적용: 가장 가까운 이웃 중심 거리의 절반(여유 포함) → 겹침 0
+    //     (위치가 아직 움직이는 중에 줄이면 일시적 겹침 때문에 반지름이 영구히 과도하게 작아진다)
+    let shrunkNow = 0;
+    for (let i = 0; i < chain.length; i++) {
+      let dmin = Infinity;
+      for (let j = 0; j < chain.length; j++) if (j !== i) dmin = Math.min(dmin, g.dist(chain[i], chain[j]));
+      const maxR = Math.max((dmin - CONFIG.circle_pad) / 2, CONFIG.radius.min);
+      const target = round(Math.min(chain[i].radius0, maxR));
+      if (Math.abs(chain[i].radius - target) > TOL) { chain[i].radius = target; shrunkNow++; }
+    }
+    shrunk += shrunkNow;
+    if (!shrunkNow) break; // 위치도 반지름도 안 바뀜 → 수렴
   }
   if (spaced) rep.add("layout", "areas", "crowded", "spaced", `인접 구역 진행도 간격 ${gap} 확보(${spaced}회 이동)`);
   if (pulled) rep.add("layout", "combat.normalized_center", "far", "near path", `경로에서 먼 구역 ${pulled}회 경로 쪽으로 이동(가장자리 거리 ≤ ${CONFIG.combat_gap_max})`);
