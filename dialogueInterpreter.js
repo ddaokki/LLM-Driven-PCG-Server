@@ -46,10 +46,10 @@ function normalizeDialogue(dialogue) {
 
 // ---------------------------------------------------------------- 키워드 표
 const THEME_KEYWORDS = {
-  forest: ["숲", "삼림", "정글", "밀림", "forest", "jungle", "woods"],
-  grassland: ["초원", "들판", "평원", "목초", "grassland", "meadow", "prairie", "plain"],
-  desert: ["사막", "황야", "모래", "desert", "dune", "wasteland"],
-  snow: ["설원", "설산", "눈", "빙하", "얼음", "snow", "ice", "glacier", "tundra", "frozen"],
+  forest: ["숲", "삼림", "정글", "밀림", "forest", "forests", "jungle", "woods", "woodland"],
+  grassland: ["초원", "들판", "평원", "목초", "grassland", "grasslands", "meadow", "prairie", "plains", "grassy"],
+  desert: ["사막", "황야", "모래", "desert", "deserts", "dune", "dunes", "sandy", "wasteland"],
+  snow: ["설원", "설산", "눈 덮", "눈덮", "눈이 ", "눈 내", "눈내", "눈밭", "눈보라", "눈 쌓", "빙하", "얼음", "snow", "snowy", "ice", "icy", "glacier", "tundra", "frozen"],
 };
 const DENSITY_RULES = [
   { re: /빽빽|울창|우거|나무가? 많|숲이 깊|dense|thick/i, tree: +0.3 },
@@ -62,7 +62,11 @@ const DENSITY_RULES = [
 ];
 const KOREAN_NUMERALS = { 한: 1, 하나: 1, 두: 2, 둘: 2, 세: 3, 셋: 3, 네: 4, 넷: 4, 다섯: 5, 여섯: 6, 일곱: 7, 여덟: 8 };
 const ENGLISH_NUMERALS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
-const COMBAT_WORDS = /전투|싸움|싸우|몬스터|적|보스|교전|battle|fight|combat|enemy|monster|boss/i;
+// '적'은 "적당히/목적지"에 걸리지 않도록 단독 어절 꼴(적이/적을/적과/적들/적 N마리)만 인정
+const COMBAT_WORDS = /전투|싸움|싸우|몬스터|보스|교전|(?:^|\s)적(?:이|을|과|들|\s|$)|\b(?:battle|fight|combat|enemy|enemies|monster|boss)/i;
+// 숫자/수사는 전투 단어와 가까이(앞뒤 8자 이내) 있을 때만 전투 수로 본다: "바위 5개", "10분"은 제외
+const NEAR = "[^.!?,\n]{0,8}";
+const COMBAT_NEAR = "(?:전투|싸움|싸우|몬스터|보스|교전|적|battle|fight|combat|enem|monster|boss)";
 const NO_COMBAT = /전투\s*(없이|없는|는 없|빼고)|싸움\s*없|평화|조용히|no (combat|fight|enem)|peaceful/i;
 const MANY_COMBAT = /전투\s*(많이|여러|연속)|계속 싸우|쉴 새 없|many (fights|battles)|lots of (enem|combat)/i;
 const MAX_COMBAT = 6;
@@ -70,10 +74,12 @@ const MAX_COMBAT = 6;
 const detectCombatCount = (text) => {
   if (NO_COMBAT.test(text)) return 0;
   const hasCombatWord = COMBAT_WORDS.test(text);
-  // 아라비아 숫자: "전투 3번", "3회 전투", "전투 구역 2개"
-  const digit = text.match(/(\d+)\s*(번|회|개|차례|군데|곳|times?|fights?|battles?|combats?)/i) || (hasCombatWord && text.match(/(\d+)/));
-  if (digit) return Math.min(parseInt(digit[1], 10), MAX_COMBAT);
-  if (hasCombatWord) {
+  if (!hasCombatWord) return null;
+  // 아라비아 숫자: "전투 3번", "3번의 전투", "전투 구역 2개", "적 4마리" — 전투 단어 근처에서만
+  const digitRe = new RegExp(`${COMBAT_NEAR}${NEAR}?(\\d+)|(\\d+)${NEAR}?${COMBAT_NEAR}`, "i");
+  const digit = text.match(digitRe);
+  if (digit) return Math.min(parseInt(digit[1] || digit[2], 10), MAX_COMBAT);
+  {
     // 한글 수사는 단위(번/개/차례…)가 붙은 경우만 인정 - "격렬한"의 "한", "세상"의 "세" 같은 오인 방지.
     // "하나/둘/셋/넷"은 단위 없이도 단독 어절이면 인정 ("전투 하나").
     const kor = text.match(/(한|두|세|네|다섯|여섯|일곱|여덟)\s*(번|개|차례|군데|곳|마리|차)/) || text.match(/(?:^|\s)(하나|둘|셋|넷)(?=\s|$|[,.!?])/);
@@ -107,7 +113,9 @@ function interpretDialogue(dialogue) {
     const text = m.text;
     for (const [theme, words] of Object.entries(THEME_KEYWORDS)) {
       for (const kw of words) {
-        if (text.toLowerCase().includes(kw.toLowerCase())) {
+        // 영어 키워드는 단어 경계로(ice ≠ nice), 한글은 부분 문자열로 매칭
+        const hit = /^[a-z]+$/i.test(kw) ? new RegExp(`\\b${kw}\\b`, "i").test(text) : text.toLowerCase().includes(kw.toLowerCase());
+        if (hit) {
           themeScore[theme] = (themeScore[theme] || 0) + w + idx * 0.01; // 동점이면 나중 발화 우선
           intent.keywords.push(kw);
         }

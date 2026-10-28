@@ -51,6 +51,7 @@ const VALID_AREA_TYPES = ["spawn", "combat", "goal", "danger"];
 const DECIMALS = 4;
 const TOL = 1e-4;        // 규칙 판정 허용 오차 (반올림 때문에 생기는 1e-4 미만 오차를 흡수)
 const MARGIN = 1e-3;     // 보정 시 규칙 경계보다 이만큼 더 안쪽으로 (반올림 후에도 규칙 만족)
+const CONV_TOL = 5e-4;   // 서로 의존하는 두 보정(경로 근접 ↔ 반지름)의 재판정 허용 오차. 반올림 떨림(≤1e-4)보다 크고 MARGIN보다 작아야 멱등
 
 const round = (v) => Math.round(v * 10 ** DECIMALS) / 10 ** DECIMALS;
 const roundPt = (p) => ({ x: round(p.x), y: round(p.y) });
@@ -78,8 +79,12 @@ function normalizeInput(aiData) {
     for (const v of vals) if (v !== undefined) return v;
     return undefined;
   };
-  const rawPoints = pick(mp.normalized_points, d.normalized_points);
-  const rawAreas = d.areas;
+  // 무거운 처리(투영/정렬/겹침)는 전부 O(n²) 이상이므로 입력 단계에서 미리 자른다.
+  // 언리얼/LLM 계약상 점 ≤ 12, 구역 ≤ 8 이지만 여유를 두고 자르고, 실제 상한은 뒤 단계에서 적용한다.
+  const INPUT_CAP = { points: 64, areas: 64 };
+  const rawPointsAll = pick(mp.normalized_points, d.normalized_points);
+  const rawPoints = Array.isArray(rawPointsAll) ? rawPointsAll.slice(0, INPUT_CAP.points) : rawPointsAll;
+  const rawAreas = Array.isArray(d.areas) ? d.areas.slice(0, INPUT_CAP.areas) : d.areas;
   return {
     theme: typeof d.theme === "string" ? d.theme.trim().toLowerCase() : null,
     tree: toNumber(pick(be.tree_density, d.tree_density)),
@@ -303,10 +308,12 @@ function fixAreas(input, pathPts, rep, combatCountOpt) {
   if (want !== null) {
     const target = Math.max(0, Math.min(Math.round(want), CONFIG.max_areas - 2));
     let combats = areas.filter((a) => a.type === "combat");
-    while (combats.length > target) {
-      const victim = combats.pop();
-      areas = areas.filter((a) => a !== victim);
-      rep.add("areas", "combat_count", combats.length + 1, combats.length, `요청 전투 수 ${target}에 맞춰 제거`);
+    if (combats.length > target) {
+      // 뒤쪽 combat부터 제거 (한 번의 filter로 처리)
+      const removeSet = new Set(combats.slice(target));
+      areas = areas.filter((a) => !removeSet.has(a));
+      rep.add("areas", "combat_count", combats.length, target, `요청 전투 수 ${target}에 맞춰 ${combats.length - target}개 제거`);
+      combats = areas.filter((a) => a.type === "combat");
     }
     while (combats.length < target) {
       const ts = [0, ...areas.filter((a) => a.type !== "spawn" && a.type !== "goal").map((a) => g.projectToPolyline(a, pathPts).t), 1].sort((p, q) => p - q);
@@ -387,31 +394,42 @@ function layoutAreas(areas, pathPts, rep) {
     const b2 = g.pointAtProgress(pathPts, a.t);
     a.off = { x: a.x - b2.x, y: a.y - b2.y };
   };
-  for (let iter = 0; iter < 40; iter++) {
+  // 반복 상한: 경로 근접(오프셋 ≤ r+0.12)과 반지름(이웃 거리/2)이 서로 의존해 기하급수적으로 수렴하는 경우가 있어
+  // 넉넉히 둔다(n ≤ 8이라 비용은 무시할 수준). 변화가 TOL 이하면 종료.
+  for (let iter = 0; iter < 400; iter++) {
     let changed = false;
     middle.sort((p, q) => p.t - q.t);
 
     // (a) lazy 1D 간격 풀이
-    const want = middle.map((a) => a.t);
-    for (let i = 0; i < want.length; i++) {
-      const prev = i === 0 ? 0 : want[i - 1];
-      const need = gap + (extraGap.get(middle[i]) || 0);
-      if (want[i] < prev + need - TOL) want[i] = prev + need + MARGIN;
+    //   need[i] = 구역 i 앞에 필요한 간격(기본 gap + 2D 근접으로 늘린 extraGap). 총합이 1을 넘으면
+    //   extraGap 부분만 비례 축소해 항상 해가 있게 한다(기본 gap 합 ≤ 7×0.061 < 1).
+    //   하한(앞에서 밀기) → 상한(끝에서 당기기) 순서의 표준 1D 해법. 결과는 모든 제약을 동시에 만족하므로
+    //   앞/뒤 패스가 번갈아 밀고 당기는 진동이 생기지 않는다.
+    const n = middle.length;
+    let needs = middle.map((a) => gap + (extraGap.get(a) || 0));
+    const budget = 1 - MARGIN * (n + 1);
+    const baseSum = gap * (n + 1);
+    const extraSum = needs.reduce((acc, v) => acc + v, 0) + gap - baseSum;
+    if (extraSum > 0 && baseSum + extraSum > budget) {
+      const sc = Math.max(0, (budget - baseSum) / extraSum);
+      needs = needs.map((v) => gap + (v - gap) * sc);
     }
-    for (let i = want.length - 1; i >= 0; i--) {
-      const next = i === want.length - 1 ? 1 : want[i + 1];
-      const need = gap + (i === want.length - 1 ? 0 : (extraGap.get(middle[i + 1]) || 0));
-      if (want[i] > next - need + TOL) want[i] = next - need - MARGIN;
+    const lb = [];
+    for (let i = 0; i < n; i++) lb[i] = Math.max(middle[i].t, (i === 0 ? 0 : lb[i - 1]) + needs[i] + MARGIN);
+    const want = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      const cap = i === n - 1 ? 1 - gap - MARGIN : want[i + 1] - needs[i + 1] - MARGIN;
+      want[i] = Math.min(lb[i], cap);
     }
     for (let i = 0; i < middle.length; i++) {
-      if (Math.abs(want[i] - middle[i].t) > TOL) { middle[i].t = want[i]; placeOnPath(middle[i]); spaced++; changed = true; }
+      if (Math.abs(want[i] - middle[i].t) > CONV_TOL) { middle[i].t = want[i]; placeOnPath(middle[i]); spaced++; changed = true; }
     }
 
     // (b) 경로 근접: 오프셋 길이 ≤ 반지름 + combat_gap_max
     for (const a of middle) {
       const len = Math.hypot(a.off.x, a.off.y);
       const maxLen = a.radius + CONFIG.combat_gap_max - MARGIN;
-      if (len > maxLen + TOL) { const k = maxLen / len; a.off = { x: a.off.x * k, y: a.off.y * k }; placeOnPath(a); pulled++; changed = true; }
+      if (len > maxLen + CONV_TOL) { const k = maxLen / len; a.off = { x: a.off.x * k, y: a.off.y * k }; placeOnPath(a); pulled++; changed = true; }
     }
 
     // (b') 경로가 휘어 투영 진행도가 배정값과 어긋나는 구역은 길 위로 (다음 패스가 같은 t를 보도록)
@@ -430,7 +448,9 @@ function layoutAreas(areas, pathPts, rep) {
     const chain = [spawn, ...middle, goal];
     for (let i = 1; i < chain.length; i++) {
       if (g.dist(chain[i - 1], chain[i]) < minCenterDist - TOL && chain[i] !== goal) {
-        extraGap.set(chain[i], (extraGap.get(chain[i]) || 0) + gap); changed = true;
+        // 상한(3×gap)까지만 늘린다. 경로가 접혀 2D 거리가 안 벌어지는 경우 무한히 늘어나며 루프가 안 끝나는 것 방지
+        const cur = extraGap.get(chain[i]) || 0;
+        if (cur < 3 * gap) { extraGap.set(chain[i], cur + gap); changed = true; }
       }
     }
     if (changed) continue;
@@ -443,7 +463,7 @@ function layoutAreas(areas, pathPts, rep) {
       for (let j = 0; j < chain.length; j++) if (j !== i) dmin = Math.min(dmin, g.dist(chain[i], chain[j]));
       const maxR = Math.max((dmin - CONFIG.circle_pad) / 2, CONFIG.radius.min);
       const target = round(Math.min(chain[i].radius0, maxR));
-      if (Math.abs(chain[i].radius - target) > TOL) { chain[i].radius = target; shrunkNow++; }
+      if (Math.abs(chain[i].radius - target) > CONV_TOL) { chain[i].radius = target; shrunkNow++; }
     }
     shrunk += shrunkNow;
     if (!shrunkNow) break; // 위치도 반지름도 안 바뀜 → 수렴
@@ -454,7 +474,37 @@ function layoutAreas(areas, pathPts, rep) {
   if (shrunk) rep.add("layout", "normalized_radius", "overlap", "shrunk", `이웃 구역과 겹치지 않도록 반지름 축소 ${shrunk}회`);
 
   middle.sort((p, q) => p.t - q.t);
-  return [spawn, ...middle, goal];
+  const ordered = [spawn, ...middle, goal];
+
+  // 최종 안전 패스: 위 루프가 반복 상한에 걸려 (d)가 실행되지 않은 경우에도 겹침 0은 보장한다.
+  // 반지름 축소 → 경로 근접 재적용 → 반지름 축소 순서 (수렴한 경우엔 전부 no-op이라 멱등성에 영향 없음)
+  const shrinkAll = () => {
+    let cnt = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      let dmin = Infinity;
+      for (let j = 0; j < ordered.length; j++) if (j !== i) dmin = Math.min(dmin, g.dist(ordered[i], ordered[j]));
+      const maxR = Math.max((dmin - CONFIG.circle_pad) / 2, CONFIG.radius.min);
+      if (ordered[i].radius > maxR + CONV_TOL) { ordered[i].radius = round(maxR); cnt++; }
+    }
+    return cnt;
+  };
+  let finalShrunk = 0;
+  for (let k = 0; k < 100; k++) {
+    let cnt = shrinkAll();
+    for (const a of middle) {
+      const pr = g.projectToPolyline(a, pathPts);
+      const maxLen = a.radius + CONFIG.combat_gap_max - MARGIN;
+      if (pr.dist > maxLen + CONV_TOL) {
+        const kk = maxLen / pr.dist;
+        a.x = round(pr.point.x + (a.x - pr.point.x) * kk); a.y = round(pr.point.y + (a.y - pr.point.y) * kk);
+        cnt++;
+      }
+    }
+    finalShrunk += cnt;
+    if (!cnt) break;
+  }
+  if (finalShrunk) rep.add("layout", "normalized_radius", "overlap", "shrunk", `반복 상한 도달 후 최종 패스에서 반지름/근접 보정 ${finalShrunk}회`);
+  return ordered;
 }
 
 // ---------------------------------------------------------------- 10. 난이도 곡선

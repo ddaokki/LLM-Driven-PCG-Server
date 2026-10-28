@@ -56,8 +56,9 @@ function createApp() {
         candidate = r.candidate; source = r.source; llmError = r.llm_error;
       }
 
-      // pcg_json을 직접 준 경우에만 combat_count를 validator 옵션으로 넘긴다(후보 생성 경로에서는 이미 반영됨)
-      const options = source === "pcg_json" && combat_count !== undefined ? { combatCount: combat_count } : {};
+      // combat_count가 오면 후보 출처와 무관하게 validator가 최종 개수를 강제한다
+      // (rule 후보는 이미 반영돼 있어 no-op, vllm 후보는 LLM이 개수를 틀릴 수 있으므로 여기서 맞춘다)
+      const options = combat_count !== undefined && combat_count !== null ? { combatCount: combat_count } : {};
       const { zone, report } = validateWithReport(candidate, options);
 
       console.log(`[generate-zone] user=${userId} source=${source} corrections=${report.correction_count} hard=${report.hard_violations_before} score=${report.quality_score} combats=${zone.areas.filter((a) => a.area_type === "combat").length}${llmError ? ` llm_error="${llmError}"` : ""}`);

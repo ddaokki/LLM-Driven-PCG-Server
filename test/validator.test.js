@@ -276,3 +276,22 @@ test("V3-16 처음에 겹쳐 있던 큰 combat들은 간격 확보 후 반지름
   for (const c of cs) assert.ok(c.normalized_radius >= 0.05, `radius too small: ${c.normalized_radius}`);
   expectInvariants(z);
 });
+
+test("V3-17 (리뷰 Important-1) 레이아웃 루프가 상한에 걸려도 최종 반지름 패스로 겹침 0", () => {
+  const z = validatePCGParams({
+    main_path: { normalized_points: pts([0.97, 0], [0.9701, 0.9701], [0.03, 0.0299], [0.97, 0.0299]) },
+    areas: [area("combat", 0.978, 0.027, 0.3), area("danger", 0.993, 0.017, 0.12)],
+  });
+  expectInvariants(z);
+});
+
+test("V3-18 (리뷰 Important-3) areas 80,000개 + combat_count 0 → 1초 이내", () => {
+  const many = Array.from({ length: 80000 }, () => ({}));
+  const t0 = Date.now();
+  const z = validatePCGParams({ areas: many }, { combatCount: 0 });
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+  expectInvariants(z);
+  const t1 = Date.now();
+  validatePCGParams({ main_path: { normalized_points: Array.from({ length: 50000 }, (_, i) => ({ x: (i % 100) / 100, y: ((i * 7) % 100) / 100 })) } });
+  assert.ok(Date.now() - t1 < 1000, `points took ${Date.now() - t1}ms`);
+});

@@ -110,3 +110,21 @@ test("RULE-13 '격렬한 큰 전투 두 번' → 2 ('격렬한'의 '한'을 수�
   assert.equal(interpretDialogue(dlg("?", "조용한 숲에서 전투 하나")).combatCount, 1);
   assert.equal(interpretDialogue(dlg("?", "위험한 숲")).combatCount, 1, "수사 없음 → 기본 1");
 });
+
+test("RULE-14 (리뷰 Important-4) 전투와 무관한 숫자/단어는 전투 수로 세지 않음", () => {
+  assert.equal(interpretDialogue(dlg("?", "바위 5개 정도 있는 사막으로 가자")).combatCount, 1);
+  assert.equal(interpretDialogue(dlg("?", "목적지까지 10분 걸리는 숲길")).combatCount, 1);
+  assert.equal(interpretDialogue(dlg("?", "적당히 어두운 숲")).combatCount, 1);
+  assert.equal(interpretDialogue(dlg("?", "전투 3번")).combatCount, 3);
+  assert.equal(interpretDialogue(dlg("?", "3번의 전투가 있는 숲")).combatCount, 3);
+  assert.equal(interpretDialogue(dlg("?", "적 4마리와 싸우고 싶어")).combatCount, 4);
+  assert.equal(interpretDialogue(dlg("?", "전투 구역 2개")).combatCount, 2);
+});
+
+test("RULE-15 (리뷰 Important-4) 영어 키워드는 단어 경계, '눈'은 눈앞/눈치에 안 걸림", () => {
+  assert.equal(interpretDialogue(dlg("?", "Nice, take me somewhere")).theme, "forest");
+  assert.equal(interpretDialogue(dlg("?", "explain the plan")).theme, "forest");
+  assert.equal(interpretDialogue(dlg("?", "눈앞에 펼쳐진 숲")).theme, "forest");
+  assert.equal(interpretDialogue(dlg("?", "눈 덮인 산")).theme, "snow");
+  assert.equal(interpretDialogue(dlg("?", "an ice field")).theme, "snow");
+});
