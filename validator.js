@@ -1,251 +1,504 @@
 /**
- * validator.js
- * LLM의 상대적 의도(비율)를 보존하는 수학적 보정 엔진 (합 정규화 및 스무딩 적용)
+ * validator.js (v3, 2026-10-28)
+ * LLM이 낸 Zone 후보를 언리얼이 그대로 쓸 수 있는 "레이아웃 정합성이 보장된" Zone JSON으로 보정한다.
+ *
+ * 1차(값 범위/타입) → 2차(구역 순서/간격) → 3차(이 파일):
+ *   경로 기하(중복점·자기교차·급회전·가장자리·spawn-goal 거리), 경로-구역 결합(spawn/goal 스냅,
+ *   combat 경로 근접), 진행도(호길이) 기준 정렬, 2D 겹침 해소, 테마 4종 밀도 프로필, 난이도 곡선,
+ *   보정 리포트/품질 점수.
+ *
+ * 설계 원칙
+ *  - 결정적: 난수 없음. 같은 입력 → 같은 출력.
+ *  - 멱등: validate(validate(x)) === validate(x). 출력은 이미 모든 규칙을 만족하므로 다시 넣어도 안 바뀐다.
+ *    (그래서 tanh 소프트 클램프는 뺐다 - 소프트 압축은 멱등일 수 없고, 테마 범위 하드 클램프에 항상 지배되어
+ *     실제 효과도 없었다. 증명: 멱등+단조+연속인 1변수 함수는 하드 클램프뿐.)
+ *  - 최소 수정: 규칙을 어긴 경우에만, 어긴 만큼만 움직인다. LLM이 정한 모양/비율/순서를 최대한 보존.
+ *  - 응답 계약 불변: 최상위 theme/base_environment/main_path/areas. debug일 때만 validation_report 추가.
  */
 
-// 0. 타입 안전장치: 문자열/null/NaN 등 비정형 입력이 들어와도 항상 유한한 숫자를 반환한다.
-//    (이게 없으면 LLM이 "0.5" 같은 문자열이나 null을 보냈을 때 NaN이 그대로
-//     전체 파이프라인을 타고 언리얼까지 전파될 수 있다.)
-const safeNumber = (val, def) => {
-  const n = typeof val === "number" ? val : parseFloat(val);
-  return Number.isFinite(n) ? n : def;
+const g = require("./lib/geometry");
+const { THEMES, VALID_THEMES, DEFAULT_THEME, getProfile, inferTheme } = require("./lib/themes");
+const { CorrectionReport } = require("./lib/report");
+
+const CONFIG = {
+  themes: THEMES,
+  max_density_sum: 1.8,
+  path_width: { min: 100, max: 1500, def: 500 },
+  points: { min: 2, max: 12 },
+  edge_margin: 0.03,          // 맵 가장자리 여백
+  merge_eps: 0.02,            // 이 거리 미만의 연속 점은 병합
+  min_turn_deg: 25,           // 이보다 급하게 꺾이면 헤어핀으로 보고 완화
+  min_spawn_goal: 0.45,       // spawn-goal 최소 직선거리
+  combat_gap_max: 0.12,       // combat 원 가장자리~경로 최대 거리
+  min_area_gap: 0.06,         // 인접 구역 최소 진행도 간격
+  circle_pad: 0.01,           // 원 사이 최소 여유
+  radius: { min: 0.01, max: 0.3, def: 0.05 },
+  max_areas: 8,
+  default_path_points: [
+    { x: 0.05, y: 0.6 },
+    { x: 0.5, y: 0.45 },
+    { x: 0.95, y: 0.5 },
+  ],
+  defaults: {
+    spawn: { radius: 0.05, detail: 0.2 },
+    combat: { radius: 0.1, detail: 0.6 },
+    goal: { radius: 0.06, detail: 0.4 },
+    danger: { radius: 0.08, detail: 0.7 },
+  },
 };
 
-// Sigmoid 스타일의 부드러운 스무딩 함수 (0~무한대 입력을 0~max 제한값으로 부드러운 매핑)
-const softClamp = (val, max = 1.0) => {
-  if (val <= 0) return 0;
-  // 하이퍼볼릭 탄젠트를 이용한 부드러운 상한선 수렴
-  return max * Math.tanh(val / max);
+const VALID_AREA_TYPES = ["spawn", "combat", "goal", "danger"];
+const DECIMALS = 4;
+const TOL = 1e-4;        // 규칙 판정 허용 오차 (반올림 때문에 생기는 1e-4 미만 오차를 흡수)
+const MARGIN = 1e-3;     // 보정 시 규칙 경계보다 이만큼 더 안쪽으로 (반올림 후에도 규칙 만족)
+
+const round = (v) => Math.round(v * 10 ** DECIMALS) / 10 ** DECIMALS;
+const roundPt = (p) => ({ x: round(p.x), y: round(p.y) });
+
+// 타입 안전장치: 문자열/null/NaN/배열 등 비정형 입력이 와도 유한한 숫자 또는 null
+const toNumber = (val) => {
+  if (typeof val === "number") return Number.isFinite(val) ? val : null;
+  if (typeof val === "string" && val.trim() !== "") {
+    const n = Number(val);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 };
+const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
-const validatePCGParams = (aiData, options = {}) => {
-  // 1. 클라이언트(병욱) 요구사항 기반 도메인 제약 조건 정의
-  const CONFIG = {
-    theme: "forest",
-    valid_themes: ["forest"], // 추후 테마 확장 시 여기에 추가
-    path_type: "main",
-    density: {
-      tree: { min: 0.2, max: 0.8, def: 0.4 },
-      rock: { min: 0.1, max: 0.6, def: 0.3 },
-      grass: { min: 0.3, max: 0.9, def: 0.7 },
-      max_total_sum: 1.8 // 세 밀도의 총합이 이 값을 넘으면 과도한 에셋 배치로 판정
-    },
-    path_width: { min: 100, max: 1500, def: 500 },
-    points_count: { min: 2, max: 8, def_length: 2 },
-    radius: { min: 0.01, max: 0.30, def: 0.05 },
-    // 구역 간 최소 x 간격(정규화 좌표 기준). "구역 배열 순서 일치" 요구사항(요구사항
-    // 분석서 백엔드 비기능요구사항 참고: areas[0]=Spawn/areas[1]=Combat/areas[2]=Goal처럼
-    // 언리얼이 배열 인덱스로 Area PCG Actor를 매칭)을 만족시키려면, 단순히 인덱스만
-    // 맞추는 게 아니라 "배열 순서 = 경로상 실제 위치 순서"까지 보장해야 실제 레벨에서도
-    // 의미가 맞는다. 이 값보다 가까우면 스포너/마커가 겹쳐 보이므로 최소 간격을 강제한다.
-    min_area_gap: 0.06,
-    // LLM이 아직 안 붙었거나 normalized_points를 안 보냈을 때 쓰는 기본 경로.
-    // README에 적어둔 연동 예시와 동일한 값으로 맞춰서, pcg_json 없이 테스트해도
-    // 직선 한 줄이 아니라 자연스럽게 꺾이는 경로 + spawn/combat/goal이 다 보이는
-    // 데모용 존이 나오게 함 (일직선 2점짜리는 시연할 때 밋밋해서 개선함)
-    default_path_points: [
-      { x: 0.05, y: 0.6 },
-      { x: 0.5, y: 0.45 },
-      { x: 0.95, y: 0.5 }
-    ]
+/**
+ * 입력 정규화. 1차 시절 평평한 스키마(tree_density 최상위)와 현재 중첩 스키마
+ * (base_environment/main_path) 둘 다 같은 내부 형태로 바꾼다. 숫자는 toNumber로, 없는 건 null.
+ */
+function normalizeInput(aiData) {
+  const d = isObj(aiData) ? aiData : {};
+  const be = isObj(d.base_environment) ? d.base_environment : {};
+  const mp = isObj(d.main_path) ? d.main_path : {};
+  const pick = (...vals) => {
+    for (const v of vals) if (v !== undefined) return v;
+    return undefined;
   };
+  const rawPoints = pick(mp.normalized_points, d.normalized_points);
+  const rawAreas = d.areas;
+  return {
+    theme: typeof d.theme === "string" ? d.theme.trim().toLowerCase() : null,
+    tree: toNumber(pick(be.tree_density, d.tree_density)),
+    rock: toNumber(pick(be.rock_density, d.rock_density)),
+    grass: toNumber(pick(be.grass_density, d.grass_density)),
+    pathWidth: toNumber(pick(mp.path_width, d.path_width)),
+    points: Array.isArray(rawPoints)
+      ? rawPoints.map((p) => (isObj(p) ? { x: toNumber(p.x), y: toNumber(p.y) } : null))
+      : null,
+    areas: Array.isArray(rawAreas)
+      ? rawAreas.map((a) => {
+          if (!isObj(a)) return null;
+          const c = isObj(a.normalized_center) ? a.normalized_center : {};
+          return {
+            type: typeof a.area_type === "string" ? a.area_type.trim().toLowerCase() : null,
+            x: toNumber(c.x),
+            y: toNumber(c.y),
+            radius: toNumber(a.normalized_radius),
+            detail: toNumber(a.detail_density),
+          };
+        })
+      : null,
+    combatCount: toNumber(d.combat_count),
+  };
+}
 
-  // 언리얼 ParseAreaType() 기준 (spawn/combat/goal/danger). 다른 문자열은 전부 combat으로 보정.
-  const validAreaTypes = ["spawn", "combat", "goal", "danger"];
+/**
+ * LLM 미연동/파싱 불가 시 반환하는 데모용 기본 존.
+ * spawn/goal은 기본 경로 양끝, combat은 경로 진행도를 균등 분할한 지점에 길옆으로 살짝 비켜 배치.
+ * 다른 입력과 똑같이 보정 파이프라인을 통과시켜 불변식(간격/겹침/스냅)을 코드로 보장한다.
+ */
+function defaultZone(combatCount = 1) {
+  const n = Math.max(0, Math.min(Math.round(toNumber(combatCount) ?? 1), CONFIG.max_areas - 2));
+  const path = CONFIG.default_path_points;
+  const combatAreas = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : (i + 1) / (n + 1);
+    const p = g.pointAtProgress(path, t);
+    combatAreas.push({
+      area_type: "combat",
+      normalized_center: { x: p.x, y: p.y + (i % 2 === 0 ? 0.05 : -0.05) },
+      normalized_radius: CONFIG.defaults.combat.radius,
+      detail_density: CONFIG.defaults.combat.detail,
+    });
+  }
+  const prof = getProfile(DEFAULT_THEME);
+  const raw = {
+    theme: DEFAULT_THEME,
+    base_environment: { tree_density: prof.tree.def, rock_density: prof.rock.def, grass_density: prof.grass.def },
+    main_path: { path_type: "main", path_width: CONFIG.path_width.def, normalized_points: path },
+    areas: [
+      { area_type: "spawn", normalized_center: path[0], normalized_radius: CONFIG.defaults.spawn.radius, detail_density: CONFIG.defaults.spawn.detail },
+      ...combatAreas,
+      { area_type: "goal", normalized_center: path[path.length - 1], normalized_radius: CONFIG.defaults.goal.radius, detail_density: CONFIG.defaults.goal.detail },
+    ],
+  };
+  return validateWithReport(raw).zone;
+}
 
-  // 주의: 언리얼 ApplyZoneJsonString()은 밀도/경로 값을 최상위가 아니라
-  // base_environment / main_path 하위 객체에서 읽는다 (PCGZoneController.cpp
-  // TryGetObjectField(TEXT("base_environment")/"main_path") 참고). 최상위에
-  // 평평하게 내려주면 파싱 자체가 실패(및 false 반환)하므로 반드시 중첩시켜야 함.
-  //
-  // combatCount: LLM API가 아직 /generate-zone에 붙지 않아서(README 참고) dialogue를
-  // 실제로 해석하지 못하는 동안에도, "전투 구역이 여러 개 생성되는" 시나리오를 데모/검증할
-  // 수 있게 하는 옵션. 기본값 1(spawn+combat 1개+goal = 총 3개, 기존 동작과 동일)이며,
-  // 값을 늘리면 combat 구역을 그만큼 경로상에 고르게 배치한 존을 반환한다.
-  // (강지석/최병욱 공유: "전투구역이 시작-전투-끝 3개로 고정된다"는 건 이 데모 존이 원래
-  // combat 1개짜리였기 때문이지, areas 배열 자체에 개수 제한이 걸려있던 건 아니다 - 아래
-  // 5번 "구역(Areas) 데이터 보정" 로직은 원래부터 aiData.areas 길이를 그대로 통과시킨다.)
-  const defaultZone = (combatCount = 1) => {
-    const safeCombatCount = Math.max(0, Math.min(Math.round(safeNumber(combatCount, 1)), CONFIG.points_count.max));
-
-    const combatAreas = [];
-    for (let i = 0; i < safeCombatCount; i++) {
-      // spawn(0.12)과 goal(0.85) 사이 구간에 combat 구역들을 고르게 분산 배치
-      const t = safeCombatCount === 1 ? 0.5 : (i + 1) / (safeCombatCount + 1);
-      const x = parseFloat((0.12 + t * (0.85 - 0.12)).toFixed(3));
-      const y = parseFloat((0.5 + (i % 2 === 0 ? -0.05 : 0.05)).toFixed(3));
-      combatAreas.push({
-        area_type: "combat",
-        normalized_center: { x, y },
-        normalized_radius: 0.10,
-        detail_density: 0.6
-      });
+// ---------------------------------------------------------------- 1~2. 테마 + 밀도
+function fixThemeAndDensity(input, rep) {
+  let theme;
+  if (input.theme && VALID_THEMES.includes(input.theme)) {
+    theme = input.theme;
+  } else {
+    theme = inferTheme({ tree: input.tree, rock: input.rock, grass: input.grass });
+    rep.add("theme", "theme", input.theme, theme, input.theme ? "화이트리스트 밖 → 밀도 패턴으로 추정" : "미지정 → 밀도 패턴으로 추정");
+  }
+  const prof = getProfile(theme);
+  const dens = {};
+  for (const [k, field] of [["tree", "tree_density"], ["rock", "rock_density"], ["grass", "grass_density"]]) {
+    const raw = input[k];
+    if (raw === null) {
+      dens[k] = prof[k].def;
+      rep.add("density", field, raw, dens[k], `누락/비정형 → ${theme} 기본값`);
+      continue;
     }
-
-    return {
-      theme: CONFIG.theme,
-      base_environment: {
-        tree_density: CONFIG.density.tree.def,
-        rock_density: CONFIG.density.rock.def,
-        grass_density: CONFIG.density.grass.def
-      },
-      main_path: {
-        path_type: CONFIG.path_type,
-        path_width: CONFIG.path_width.def,
-        normalized_points: CONFIG.default_path_points
-      },
-      areas: [
-        { area_type: "spawn", normalized_center: { x: 0.12, y: 0.5 }, normalized_radius: 0.05, detail_density: 0.2 },
-        ...combatAreas,
-        { area_type: "goal", normalized_center: { x: 0.85, y: 0.48 }, normalized_radius: 0.06, detail_density: 0.4 }
-      ]
-    };
-  };
-
-  if (!aiData) {
-    return defaultZone(options.combatCount);
+    const c = g.clamp(raw, prof[k].min, prof[k].max);
+    if (c !== raw) rep.add("density", field, raw, round(c), `${theme} 허용 범위 [${prof[k].min}, ${prof[k].max}] 클램프`);
+    dens[k] = c;
   }
-
-  const validated = { base_environment: {}, main_path: {} };
-
-  // theme: 화이트리스트 통과 시에만 LLM 값 반영, 아니면 기본 forest로 보정
-  validated.theme = CONFIG.valid_themes.includes(aiData.theme) ? aiData.theme : CONFIG.theme;
-
-  // 2. [기법 ② 적용] 소프트 클램핑을 통한 1차 음수 제거 및 상한선 완화
-  let rawTree = softClamp(safeNumber(aiData.tree_density, CONFIG.density.tree.def));
-  let rawRock = softClamp(safeNumber(aiData.rock_density, CONFIG.density.rock.def));
-  let rawGrass = softClamp(safeNumber(aiData.grass_density, CONFIG.density.grass.def));
-
-  // 3. [기법 ① 적용] 밀도 합 정규화 (Density Sum Normalization)
-  const totalSum = rawTree + rawRock + rawGrass;
-  if (totalSum > CONFIG.density.max_total_sum) {
-    // LLM이 의도한 비율(Ratio)을 유지하면서 총합 1.8 규격 내로 압축 스케일링
-    const scaleFactor = CONFIG.density.max_total_sum / totalSum;
-    rawTree *= scaleFactor;
-    rawRock *= scaleFactor;
-    rawGrass *= scaleFactor;
-  }
-
-  // 최종 밀도는 에셋별 허용 범위(min~max)로 클램프 (기획 의도: 나무는 최소 0.2는 있어야 숲처럼 보임 등)
-  const finalClamp = (val, min, max) => Math.min(Math.max(val, min), max);
-  validated.base_environment.tree_density = finalClamp(rawTree, CONFIG.density.tree.min, CONFIG.density.tree.max);
-  validated.base_environment.rock_density = finalClamp(rawRock, CONFIG.density.rock.min, CONFIG.density.rock.max);
-  validated.base_environment.grass_density = finalClamp(rawGrass, CONFIG.density.grass.min, CONFIG.density.grass.max);
-
-  // 4. 경로(Path) 데이터 보정
-  validated.main_path.path_type = CONFIG.path_type;
-  validated.main_path.path_width = finalClamp(
-    safeNumber(aiData.path_width, CONFIG.path_width.def),
-    CONFIG.path_width.min,
-    CONFIG.path_width.max
-  );
-
-  // 이동 경로 노드 개수 스무딩 및 스케일링
-  if (Array.isArray(aiData.normalized_points) && aiData.normalized_points.length >= CONFIG.points_count.min) {
-    let points = aiData.normalized_points.slice(0, CONFIG.points_count.max);
-    validated.main_path.normalized_points = points.map(pt => ({
-      x: finalClamp(safeNumber(pt && pt.x, 0.5), 0.0, 1.0),
-      y: finalClamp(safeNumber(pt && pt.y, 0.5), 0.0, 1.0)
-    }));
-  } else {
-    validated.main_path.normalized_points = CONFIG.default_path_points;
-  }
-
-  // 5. 구역(Areas) 데이터 보정
-  if (Array.isArray(aiData.areas)) {
-    validated.areas = aiData.areas.map(area => {
-      const type = validAreaTypes.includes(area && area.area_type) ? area.area_type : "combat";
-
-      return {
-        area_type: type,
-        normalized_center: {
-          x: finalClamp(safeNumber(area && area.normalized_center && area.normalized_center.x, 0.5), 0.0, 1.0),
-          y: finalClamp(safeNumber(area && area.normalized_center && area.normalized_center.y, 0.5), 0.0, 1.0)
-        },
-        // 반지름 소프트 클램핑 적용
-        normalized_radius: finalClamp(
-          softClamp(safeNumber(area && area.normalized_radius, CONFIG.radius.def), CONFIG.radius.max),
-          CONFIG.radius.min,
-          CONFIG.radius.max
-        ),
-        detail_density: finalClamp(safeNumber(area && area.detail_density, 0.5), 0.0, 1.0)
-      };
-    });
-  } else {
-    validated.areas = [];
-  }
-
-  // 6. 플레이 가능성 구조 검증: spawn/goal이 최소 1개씩은 있도록 보장한다.
-  //    (combat은 없어도 게임이 깨지지 않으므로 강제하지 않음 - 평화로운 존도 유효한 설계)
-  const hasType = (t) => validated.areas.some(a => a.area_type === t);
-  if (!hasType("spawn")) {
-    validated.areas.unshift({
-      area_type: "spawn",
-      normalized_center: { x: 0.12, y: 0.5 },
-      normalized_radius: CONFIG.radius.def,
-      detail_density: 0.2
-    });
-  }
-  if (!hasType("goal")) {
-    validated.areas.push({
-      area_type: "goal",
-      normalized_center: { x: 0.85, y: 0.48 },
-      normalized_radius: CONFIG.radius.def,
-      detail_density: 0.4
-    });
-  }
-
-  // 7. [2차 고도화] 공간적 순서 일치 보정 (Spatial Ordering)
-  //    1학기 버전은 LLM이 준 areas 배열 순서를 그대로 통과시켰는데, 이러면 언리얼의
-  //    "배열 인덱스 = Area PCG Actor 인덱스" 매칭(PCGZoneController.cpp ApplyAreaPCG)
-  //    특성상, LLM이 순서를 뒤섞어 보내면 실제로는 경로 뒤쪽에 있어야 할 구역이 앞쪽
-  //    액터 자리에 매칭되는 등 "배열 순서"와 "경로상 실제 위치"가 어긋날 수 있었다.
-  //    spawn을 항상 맨 앞, goal을 항상 맨 뒤로 고정하고, 나머지(combat/danger)는
-  //    경로 진행 방향(정규화 x 좌표 오름차순)으로 정렬해서 두 순서를 강제로 일치시킨다.
-  const spawnAreas = validated.areas.filter(a => a.area_type === "spawn");
-  const goalAreas = validated.areas.filter(a => a.area_type === "goal");
-  const middleAreas = validated.areas
-    .filter(a => a.area_type !== "spawn" && a.area_type !== "goal")
-    .sort((a, b) => a.normalized_center.x - b.normalized_center.x);
-  validated.areas = [...spawnAreas, ...middleAreas, ...goalAreas];
-
-  // 8. [2차 고도화] 최소 간격 보정 (Minimum Spacing Enforcement)
-  //    정렬은 순서만 바로잡을 뿐, LLM이 같은 x 좌표 근처에 구역을 몰아서 보내면
-  //    Combat 스포너나 마커가 서로 겹쳐 보일 수 있다. 정렬된 순서를 그대로 유지한 채
-  //    (LLM이 의도한 상대적 배치 의도는 보존) 인접 구역과의 간격이 min_area_gap보다
-  //    좁으면 뒤 구역을 부드럽게 밀어내는 방식으로만 벌린다 (앞 구역 위치는 건드리지 않음).
-  for (let i = 1; i < validated.areas.length; i++) {
-    const prevX = validated.areas[i - 1].normalized_center.x;
-    const currX = validated.areas[i].normalized_center.x;
-    if (currX - prevX < CONFIG.min_area_gap) {
-      validated.areas[i] = {
-        ...validated.areas[i],
-        normalized_center: {
-          ...validated.areas[i].normalized_center,
-          x: finalClamp(prevX + CONFIG.min_area_gap, 0.0, 1.0)
-        }
-      };
+  // 합 정규화: 비율 유지하며 총합을 max_density_sum 이내로. 스케일 후 min 아래로 떨어지면 min으로 올리는데,
+  // 그러면 합이 다시 커질 수 있으므로 min 보장은 두 번째 패스에서 최종 확인한다 (min들의 합 < 1.8이라 항상 수렴).
+  const sum = dens.tree + dens.rock + dens.grass;
+  if (sum > CONFIG.max_density_sum + 1e-12) {
+    const s = CONFIG.max_density_sum / sum;
+    for (const k of ["tree", "rock", "grass"]) {
+      const before = dens[k];
+      dens[k] = Math.max(dens[k] * s, prof[k].min);
+      rep.add("density", `${k}_density`, round(before), round(dens[k]), `밀도 합 ${round(sum)} > ${CONFIG.max_density_sum} → 비율 유지 스케일(${round(s)})`);
     }
   }
+  for (const k of ["tree", "rock", "grass"]) dens[k] = round(dens[k]);
+  return { theme, dens };
+}
 
-  // 9. [2차 고도화] 반지름-간격 정합성 보정
-  //    구역 반지름이 실제 인접 구역까지의 거리보다 크면 원(Area) 표시가 서로 겹쳐
-  //    보이므로, 좌우 인접 구역까지 거리의 절반을 넘지 않도록 한 번 더 clamp한다.
-  //    (radius.min은 최소 보장선으로 유지 - 완전히 0으로 짜부라지지 않게)
-  validated.areas = validated.areas.map((area, i) => {
-    const gaps = [];
-    if (i > 0) gaps.push(area.normalized_center.x - validated.areas[i - 1].normalized_center.x);
-    if (i < validated.areas.length - 1) gaps.push(validated.areas[i + 1].normalized_center.x - area.normalized_center.x);
-    if (gaps.length === 0) return area;
+// ---------------------------------------------------------------- 3. 경로 기하
+function fixPath(input, rep) {
+  const lo = CONFIG.edge_margin, hi = 1 - CONFIG.edge_margin;
+  let pts = (input.points || [])
+    .filter((p) => p && p.x !== null && p.y !== null)
+    .map((p) => ({ x: g.clamp(p.x, 0, 1), y: g.clamp(p.y, 0, 1) }));
 
-    const maxAllowedRadius = Math.max(Math.min(...gaps) / 2, CONFIG.radius.min);
-    return {
-      ...area,
-      normalized_radius: Math.min(area.normalized_radius, maxAllowedRadius)
-    };
+  const rawCount = Array.isArray(input.points) ? input.points.length : 0;
+  if (pts.length !== rawCount) rep.add("path", "normalized_points", rawCount, pts.length, "숫자 x/y가 아닌 점 제거");
+  if (pts.length > CONFIG.points.max) {
+    rep.add("path", "normalized_points", pts.length, CONFIG.points.max, `경로 점 상한 ${CONFIG.points.max}`);
+    pts = pts.slice(0, CONFIG.points.max);
+  }
+
+  const useDefault = (reason) => {
+    rep.add("path", "normalized_points", pts.length, "default", reason);
+    return CONFIG.default_path_points.map(roundPt);
+  };
+  if (pts.length < CONFIG.points.min) return useDefault("경로 점 2개 미만 → 기본 경로");
+  if (g.polylineLength(pts) < CONFIG.merge_eps) return useDefault("경로 길이 0(점 전부 동일) → 기본 경로");
+
+  // 가장자리 여백
+  let margined = 0;
+  pts = pts.map((p) => {
+    const q = { x: g.clamp(p.x, lo, hi), y: g.clamp(p.y, lo, hi) };
+    if (q.x !== p.x || q.y !== p.y) margined++;
+    return q;
+  });
+  if (margined) rep.add("path", "normalized_points", margined, 0, `맵 가장자리 여백 ${CONFIG.edge_margin} 안으로 이동`);
+
+  // 보정 전 필수 규칙 위반 기록
+  const xBefore = g.findSelfIntersections(pts).length;
+  if (xBefore) rep.hard("path", `자기교차 ${xBefore}건`);
+  if (g.dist(pts[0], pts[pts.length - 1]) < CONFIG.min_spawn_goal - TOL) rep.hard("path", `spawn-goal 거리 ${round(g.dist(pts[0], pts[pts.length - 1]))} < ${CONFIG.min_spawn_goal}`);
+
+  // 기하 보정 루프: 각 단계가 다른 단계의 전제를 깰 수 있으므로 안정될 때까지 반복
+  for (let round_ = 0; round_ < 6; round_++) {
+    let changed = false;
+
+    const merged = g.mergeClosePoints(pts, CONFIG.merge_eps);
+    if (merged.length !== pts.length) {
+      rep.add("path", "normalized_points", pts.length, merged.length, `근접(<${CONFIG.merge_eps}) 중복점 병합`);
+      pts = merged; changed = true;
+    }
+    if (pts.length < 2) return useDefault("병합 후 점 부족 → 기본 경로");
+
+    const un = g.untangle(pts, 30);
+    if (un.flips) { rep.add("path", "normalized_points", "crossing", "untangled", `2-opt 구간 뒤집기 ${un.flips}회로 자기교차 해소`); pts = un.points; changed = true; }
+
+    // 급회전: 몇 번 완화해보고 그래도 안 풀리면 꼭짓점 제거
+    let relaxed = 0, removed = 0;
+    for (let i = 0; i < 8; i++) {
+      const r = g.relaxSharpTurns(pts, CONFIG.min_turn_deg, 0.5);
+      if (!r.count) break;
+      pts = r.points; relaxed += r.count;
+    }
+    for (let guard = 0; guard < pts.length; guard++) {
+      const idx = pts.findIndex((p, i) => i > 0 && i < pts.length - 1 && g.turnAngleDeg(pts[i - 1], p, pts[i + 1]) < CONFIG.min_turn_deg);
+      if (idx < 0) break;
+      pts = pts.filter((_, i) => i !== idx); removed++;
+    }
+    if (relaxed || removed) { rep.add("path", "normalized_points", "hairpin", "relaxed", `급회전(<${CONFIG.min_turn_deg}°) 완화 ${relaxed}회, 제거 ${removed}점`); changed = true; }
+
+    const pushed = g.pushEndpointsApart(pts, CONFIG.min_spawn_goal, { target: CONFIG.min_spawn_goal + MARGIN, lo, hi, tol: TOL });
+    if (pushed.moved) { rep.add("path", "spawn-goal", round(g.dist(pts[0], pts[pts.length - 1])), CONFIG.min_spawn_goal, "spawn-goal 최소 거리 확보(양 끝점 반대 방향으로 이동)"); pts = pushed.points; changed = true; }
+
+    pts = pts.map((p) => ({ x: g.clamp(p.x, lo, hi), y: g.clamp(p.y, lo, hi) }));
+    pts = pts.map(roundPt);
+    if (!changed) break;
+  }
+  if (pts.length < 2 || g.findSelfIntersections(pts).length) return useDefault("기하 보정 실패 → 기본 경로");
+  return pts;
+}
+
+// ---------------------------------------------------------------- 4~5. 구역 타입/값 + 구조 보장
+function fixAreas(input, pathPts, rep, combatCountOpt) {
+  const start = pathPts[0], end = pathPts[pathPts.length - 1];
+  const raw = Array.isArray(input.areas) ? input.areas : [];
+  const dropped = raw.filter((a) => !a).length;
+  if (dropped) rep.add("areas", "areas", raw.length, raw.length - dropped, "객체가 아닌 항목 제거");
+
+  let areas = raw.filter(Boolean).map((a, i) => {
+    const type = VALID_AREA_TYPES.includes(a.type) ? a.type : "combat";
+    if (type !== a.type) rep.add("areas", `areas[${i}].area_type`, a.type, type, "화이트리스트(spawn/combat/goal/danger) 밖 → combat");
+    const def = CONFIG.defaults[type];
+    const x = a.x === null ? null : g.clamp(a.x, 0, 1);
+    const y = a.y === null ? null : g.clamp(a.y, 0, 1);
+    let radius = a.radius === null ? def.radius : g.clamp(a.radius, CONFIG.radius.min, CONFIG.radius.max);
+    if (a.radius !== null && radius !== a.radius) rep.add("areas", `areas[${i}].normalized_radius`, a.radius, radius, `반지름 [${CONFIG.radius.min}, ${CONFIG.radius.max}] 클램프`);
+    let detail = a.detail === null ? def.detail : g.clamp(a.detail, 0, 1);
+    return { type, x, y, radius, detail, hadCenter: x !== null && y !== null };
   });
 
-  return validated;
-};
+  // spawn/goal 정확히 1개: 첫 번째만 유지, 나머지는 combat으로 강등
+  for (const t of ["spawn", "goal"]) {
+    let seen = false;
+    areas = areas.map((a, i) => {
+      if (a.type !== t) return a;
+      if (!seen) { seen = true; return a; }
+      rep.add("areas", `areas[${i}].area_type`, t, "combat", `${t}은 1개만 허용 → 추가분은 combat으로 강등`);
+      return { ...a, type: "combat" };
+    });
+  }
+  if (!areas.some((a) => a.type === "spawn")) {
+    rep.hard("areas", "spawn 없음");
+    rep.add("areas", "areas", "no spawn", "spawn added", "spawn 자동 추가(경로 시작점)");
+    areas.unshift({ type: "spawn", x: start.x, y: start.y, radius: CONFIG.defaults.spawn.radius, detail: CONFIG.defaults.spawn.detail, hadCenter: true });
+  }
+  if (!areas.some((a) => a.type === "goal")) {
+    rep.hard("areas", "goal 없음");
+    rep.add("areas", "areas", "no goal", "goal added", "goal 자동 추가(경로 끝점)");
+    areas.push({ type: "goal", x: end.x, y: end.y, radius: CONFIG.defaults.goal.radius, detail: CONFIG.defaults.goal.detail, hadCenter: true });
+  }
 
-module.exports = { validatePCGParams };
+  // 중심 좌표 없는 구역: 경로 위 고른 위치에 배치
+  const noCenter = areas.filter((a) => !a.hadCenter);
+  noCenter.forEach((a, i) => {
+    const p = g.pointAtProgress(pathPts, (i + 1) / (noCenter.length + 1));
+    a.x = p.x; a.y = p.y; a.hadCenter = true;
+    rep.add("areas", "normalized_center", null, roundPt(p), "중심 누락 → 경로 위 균등 배치");
+  });
+
+  // combat_count: 옵션 또는 입력의 combat_count. 부족하면 가장 큰 빈 구간에 추가, 초과하면 뒤에서부터 제거
+  const want = combatCountOpt !== undefined ? toNumber(combatCountOpt) : null;
+  if (want !== null) {
+    const target = Math.max(0, Math.min(Math.round(want), CONFIG.max_areas - 2));
+    let combats = areas.filter((a) => a.type === "combat");
+    while (combats.length > target) {
+      const victim = combats.pop();
+      areas = areas.filter((a) => a !== victim);
+      rep.add("areas", "combat_count", combats.length + 1, combats.length, `요청 전투 수 ${target}에 맞춰 제거`);
+    }
+    while (combats.length < target) {
+      const ts = [0, ...areas.filter((a) => a.type !== "spawn" && a.type !== "goal").map((a) => g.projectToPolyline(a, pathPts).t), 1].sort((p, q) => p - q);
+      let bi = 0;
+      for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > ts[bi + 1] - ts[bi]) bi = i - 1;
+      const p = g.pointAtProgress(pathPts, (ts[bi] + ts[bi + 1]) / 2);
+      const c = { type: "combat", x: p.x, y: p.y, radius: CONFIG.defaults.combat.radius, detail: CONFIG.defaults.combat.detail, hadCenter: true };
+      areas.push(c); combats = areas.filter((a) => a.type === "combat");
+      rep.add("areas", "combat_count", combats.length - 1, combats.length, `요청 전투 수 ${target}에 맞춰 가장 넓은 빈 구간에 추가`);
+    }
+  }
+
+  // 총 구역 수 상한
+  if (areas.length > CONFIG.max_areas) {
+    const spawn = areas.find((a) => a.type === "spawn");
+    const goal = areas.find((a) => a.type === "goal");
+    const middle = areas.filter((a) => a !== spawn && a !== goal).slice(0, CONFIG.max_areas - 2);
+    rep.add("areas", "areas", areas.length, CONFIG.max_areas, `구역 수 상한 ${CONFIG.max_areas}(언리얼 Area 액터/경로 길이 대비 과밀 방지)`);
+    areas = [spawn, ...middle, goal];
+  }
+  // 이후 단계와 최종 출력이 같은 숫자를 보도록 여기서 반올림 (멱등성: 두 번째 패스가 같은 입력을 봄)
+  for (const a of areas) { a.x = round(a.x); a.y = round(a.y); a.radius = round(a.radius); a.detail = round(a.detail); }
+  return areas;
+}
+
+// ---------------------------------------------------------------- 6~9. 경로-구역 결합, 정렬, 간격, 겹침, 반지름
+/**
+ * 구역 배치는 "경로 좌표계"에서 푼다: 각 중간 구역을 (진행도 t, 경로에서의 수직 오프셋 벡터)로 표현하고
+ *  (a) t는 1D 최소 간격 문제로 푼다(앞으로 밀고, 끝을 넘치면 뒤로 당김 - 구역 ≤ 8이므로 항상 해가 있음)
+ *  (b) 오프셋 길이는 반지름 + combat_gap_max 이내로 제한(경로 근접 규칙)
+ *  (c) 겹침은 중심을 옮기지 않고 반지름만 줄여서 해소(이웃 중심 거리의 절반) → 서로 싸우는 루프가 없다
+ * 모든 판정은 TOL 이내면 "이미 만족"으로 보고 건드리지 않는다(lazy) → 반올림 후 다시 넣어도 그대로(멱등).
+ */
+function layoutAreas(areas, pathPts, rep) {
+  const start = pathPts[0], end = pathPts[pathPts.length - 1];
+  const spawn = areas.find((a) => a.type === "spawn");
+  const goal = areas.find((a) => a.type === "goal");
+  const snap = (a, p, label) => {
+    if (Math.abs(a.x - p.x) > TOL || Math.abs(a.y - p.y) > TOL) {
+      rep.add("layout", `${label}.normalized_center`, roundPt(a), roundPt(p), `${label}은 경로 ${label === "spawn" ? "시작" : "끝"}점에 고정`);
+    }
+    a.x = p.x; a.y = p.y;
+  };
+  snap(spawn, start, "spawn");
+  snap(goal, end, "goal");
+
+  const middle = areas.filter((a) => a !== spawn && a !== goal);
+  const gap = CONFIG.min_area_gap;
+  const minCenterDist = 2 * CONFIG.radius.min + CONFIG.circle_pad; // 이보다 가까우면 반지름 최소값으로도 겹침
+
+  // 보정 전 필수 규칙 위반 기록
+  let farBefore = 0, overlapBefore = 0;
+  for (const a of middle) {
+    const pr = g.projectToPolyline(a, pathPts);
+    if (pr.dist - a.radius > CONFIG.combat_gap_max + TOL) farBefore++;
+  }
+  for (let i = 0; i < areas.length; i++) for (let j = i + 1; j < areas.length; j++) {
+    if (g.dist(areas[i], areas[j]) < areas[i].radius + areas[j].radius - TOL) overlapBefore++;
+  }
+  if (farBefore) rep.hard("layout", `경로에서 먼 구역 ${farBefore}개(가장자리 거리 > ${CONFIG.combat_gap_max})`);
+  if (overlapBefore) rep.hard("layout", `구역 원 겹침 ${overlapBefore}쌍`);
+
+  // 경로 좌표계로 변환
+  for (const a of middle) {
+    const pr = g.projectToPolyline(a, pathPts);
+    a.t = pr.t;
+    a.off = { x: a.x - pr.point.x, y: a.y - pr.point.y };
+  }
+
+  let spaced = 0, pulled = 0, onPath = 0, shrunk = 0;
+  const extraGap = new Map(); // 2D로 너무 가까운 쌍에 대해 늘린 간격 요구
+  const placeOnPath = (a) => {
+    const base = g.pointAtProgress(pathPts, a.t);
+    a.x = round(g.clamp(base.x + a.off.x, 0, 1)); a.y = round(g.clamp(base.y + a.off.y, 0, 1));
+    a.t = g.projectToPolyline(a, pathPts).t;
+    const b2 = g.pointAtProgress(pathPts, a.t);
+    a.off = { x: a.x - b2.x, y: a.y - b2.y };
+  };
+  for (let iter = 0; iter < 20; iter++) {
+    let changed = false;
+    middle.sort((p, q) => p.t - q.t);
+
+    // (a) lazy 1D 간격 풀이
+    const want = middle.map((a) => a.t);
+    for (let i = 0; i < want.length; i++) {
+      const prev = i === 0 ? 0 : want[i - 1];
+      const need = gap + (extraGap.get(middle[i]) || 0);
+      if (want[i] < prev + need - TOL) want[i] = prev + need + MARGIN;
+    }
+    for (let i = want.length - 1; i >= 0; i--) {
+      const next = i === want.length - 1 ? 1 : want[i + 1];
+      const need = gap + (i === want.length - 1 ? 0 : (extraGap.get(middle[i + 1]) || 0));
+      if (want[i] > next - need + TOL) want[i] = next - need - MARGIN;
+    }
+    for (let i = 0; i < middle.length; i++) {
+      if (Math.abs(want[i] - middle[i].t) > TOL) { middle[i].t = want[i]; placeOnPath(middle[i]); spaced++; changed = true; }
+    }
+
+    // (b) 경로 근접: 오프셋 길이 ≤ 반지름 + combat_gap_max
+    for (const a of middle) {
+      const len = Math.hypot(a.off.x, a.off.y);
+      const maxLen = a.radius + CONFIG.combat_gap_max - MARGIN;
+      if (len > maxLen + TOL) { const k = maxLen / len; a.off = { x: a.off.x * k, y: a.off.y * k }; placeOnPath(a); pulled++; changed = true; }
+    }
+
+    // (b') 경로가 휘어 투영 진행도가 배정값과 어긋나는 구역은 길 위로 (다음 패스가 같은 t를 보도록)
+    middle.sort((p, q) => p.t - q.t);
+    for (let i = 0; i < middle.length; i++) {
+      const a = middle[i];
+      const prev = i === 0 ? 0 : middle[i - 1].t, next = i === middle.length - 1 ? 1 : middle[i + 1].t;
+      const len = Math.hypot(a.off.x, a.off.y);
+      if (len > TOL && (a.t - prev < gap - TOL || next - a.t < gap - TOL)) {
+        // 간격 위반이 오프셋 때문에 생겼을 수 있음 → 길 위로 올려 다시 풀게 한다
+        a.off = { x: 0, y: 0 }; placeOnPath(a); onPath++; changed = true;
+      }
+    }
+
+    // (c) 반지름 정합성: 가장 가까운 이웃 중심 거리의 절반(여유 포함) → 겹침 0
+    const chain = [spawn, ...middle, goal];
+    for (let i = 0; i < chain.length; i++) {
+      let dmin = Infinity;
+      for (let j = 0; j < chain.length; j++) if (j !== i) dmin = Math.min(dmin, g.dist(chain[i], chain[j]));
+      const maxR = Math.max((dmin - CONFIG.circle_pad) / 2, CONFIG.radius.min);
+      if (chain[i].radius > maxR + TOL) { chain[i].radius = round(maxR); shrunk++; changed = true; }
+    }
+
+    // (d) 반지름 최소값으로도 겹치는 거리(중심 간 < 0.03)면 뒤 구역의 간격 요구를 늘려 다시 푼다
+    for (let i = 1; i < chain.length; i++) {
+      if (g.dist(chain[i - 1], chain[i]) < minCenterDist - TOL && chain[i] !== goal) {
+        extraGap.set(chain[i], (extraGap.get(chain[i]) || 0) + gap); changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  if (spaced) rep.add("layout", "areas", "crowded", "spaced", `인접 구역 진행도 간격 ${gap} 확보(${spaced}회 이동)`);
+  if (pulled) rep.add("layout", "combat.normalized_center", "far", "near path", `경로에서 먼 구역 ${pulled}회 경로 쪽으로 이동(가장자리 거리 ≤ ${CONFIG.combat_gap_max})`);
+  if (onPath) rep.add("layout", "combat.normalized_center", "off-path", "on-path", `경로 굴곡으로 간격이 어긋나는 구역 ${onPath}회 길 위로 이동`);
+  if (shrunk) rep.add("layout", "normalized_radius", "overlap", "shrunk", `이웃 구역과 겹치지 않도록 반지름 축소 ${shrunk}회`);
+
+  middle.sort((p, q) => p.t - q.t);
+  return [spawn, ...middle, goal];
+}
+
+// ---------------------------------------------------------------- 10. 난이도 곡선
+function fixDifficultyCurve(ordered, rep) {
+  const combats = ordered.filter((a) => a.type === "combat");
+  const vals = combats.map((a) => a.detail);
+  const sorted = vals.slice().sort((p, q) => p - q);
+  if (vals.some((v, i) => Math.abs(v - sorted[i]) > 1e-12)) {
+    rep.add("difficulty", "combat.detail_density", vals.map(round), sorted.map(round), "전투 강도가 진행 방향으로 단조 증가하도록 값 재배열(값 집합은 유지)");
+    combats.forEach((a, i) => { a.detail = sorted[i]; });
+  }
+}
+
+// ---------------------------------------------------------------- 진입점
+function validateWithReport(aiData, options = {}) {
+  const rep = new CorrectionReport();
+  if (!isObj(aiData)) {
+    if (aiData !== null && aiData !== undefined) rep.add("input", "pcg_json", typeof aiData, "default zone", "객체가 아닌 입력 → 기본 존");
+    return { zone: defaultZone(options.combatCount), report: rep.toJSON() };
+  }
+  const input = normalizeInput(aiData);
+  const { theme, dens } = fixThemeAndDensity(input, rep);
+
+  let pathWidth = input.pathWidth === null ? CONFIG.path_width.def : g.clamp(input.pathWidth, CONFIG.path_width.min, CONFIG.path_width.max);
+  if (input.pathWidth !== null && pathWidth !== input.pathWidth) rep.add("path", "path_width", input.pathWidth, pathWidth, `[${CONFIG.path_width.min}, ${CONFIG.path_width.max}] 클램프`);
+  pathWidth = round(pathWidth);
+
+  const pathPts = fixPath(input, rep);
+  const combatCountOpt = options.combatCount !== undefined ? options.combatCount : (input.combatCount !== null ? input.combatCount : undefined);
+  const areas = fixAreas(input, pathPts, rep, combatCountOpt);
+  const ordered = layoutAreas(areas, pathPts, rep);
+  fixDifficultyCurve(ordered, rep);
+
+  const zone = {
+    theme,
+    base_environment: { tree_density: dens.tree, rock_density: dens.rock, grass_density: dens.grass },
+    main_path: { path_type: "main", path_width: pathWidth, normalized_points: pathPts.map(roundPt) },
+    areas: ordered.map((a) => ({
+      area_type: a.type,
+      normalized_center: { x: round(a.x), y: round(a.y) },
+      normalized_radius: round(a.radius),
+      detail_density: round(a.detail),
+    })),
+  };
+  return { zone, report: rep.toJSON() };
+}
+
+function validatePCGParams(aiData, options = {}) {
+  const { zone, report } = validateWithReport(aiData, options);
+  if (options.debug) zone.validation_report = report;
+  return zone;
+}
+
+module.exports = { validatePCGParams, validateWithReport, normalizeInput, defaultZone, CONFIG };
