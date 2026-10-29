@@ -4,8 +4,8 @@
 <style>
   :root { --blue:#1f4fd6; --blue-soft:#eef3fb; --ink:#1b2440; --muted:#5d6a86; --line:#d6deee; --green:#1f8a4c; --red:#d4453b; --amber:#b8860b; }
   * { box-sizing:border-box; margin:0; }
-  html,body { width:1760px; height:760px; background:#fff; font-family:"Noto Sans KR","Malgun Gothic",sans-serif; color:var(--ink); }
-  .wrap { width:1760px; height:760px; padding:10px 20px; display:flex; flex-direction:column; gap:24px; }
+  html,body { width:1760px; height:560px; background:#fff; font-family:"Noto Sans KR","Malgun Gothic",sans-serif; color:var(--ink); }
+  .wrap { width:1760px; height:560px; padding:10px 20px; display:flex; flex-direction:column; gap:24px; }
   .sub { font-size:26px; color:var(--muted); font-weight:500; border-bottom:2px solid var(--line); padding-bottom:14px; }
   .steps { display:flex; align-items:stretch; }
   .card { flex:1; border:2px solid var(--line); background:#f8fafd; border-radius:20px; padding:22px 28px; display:flex; flex-direction:column; gap:8px; min-height:236px; }
@@ -14,13 +14,13 @@
   .card .d { font-size:24px; color:var(--ink); }
   .card .t { font-size:21px; color:var(--blue); font-weight:700; margin-top:auto; }
   .arrow { width:64px; display:flex; align-items:center; justify-content:center; color:var(--blue); font-size:42px; font-weight:800; }
-  .bottom { display:flex; gap:32px; flex:1; }
+  .bottom { display:flex; flex:1; }
   .panel { flex:1; border:2px solid var(--line); border-radius:20px; padding:22px 30px; background:#f8fafd; }
   .panel.plan { background:var(--blue-soft); }
   .panel h4 { font-size:27px; font-weight:800; margin-bottom:14px; }
   .panel h4 span { font-size:20px; font-weight:700; color:#fff; background:var(--blue); border-radius:10px; padding:4px 12px; margin-left:12px; vertical-align:middle; }
   .panel h4 span.now { background:var(--green); }
-  .panel ul { list-style:none; display:flex; flex-direction:column; gap:10px; }
+  .panel ul { list-style:none; display:grid; grid-template-columns:1fr 1fr; gap:12px 40px; }
   .panel li { font-size:23px; line-height:1.35; padding-left:30px; position:relative; }
   .panel li::before { content:"•"; position:absolute; left:6px; color:var(--blue); font-weight:800; }
   .panel li b { font-weight:800; }
@@ -36,15 +36,6 @@
     <div class="card"><div class="num">04</div><h3>Unreal 실행</h3><div class="d">Zone JSON → PCG 월드 생성</div><div class="t">Backend → Unreal</div></div>
   </div>
   <div class="bottom">
-    <div class="panel">
-      <h4>구현 <span class="now">현재</span></h4>
-      <ul>
-        <li><b>Node.js · Express</b> REST 서버, Redis 세션은 선택(미연결 시 자동 폴백)</li>
-        <li><b>vLLM 미구축</b> 환경 제약 → 규칙 기반 해석기로 GPU 없이 동일 흐름 시연</li>
-        <li><b>보정 엔진</b>: 경로 교차·spawn-goal 거리·구역 겹침·개수·범위를 계약대로 복구, 같은 입력에 항상 같은 출력</li>
-        <li><b>검증</b>: 자동 테스트 98건 + 무작위·적대 입력 20,000건 예외 0</li>
-      </ul>
-    </div>
     <div class="panel plan">
       <h4>역할 전환 <span>계획</span></h4>
       <ul>
