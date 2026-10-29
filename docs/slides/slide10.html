@@ -19,49 +19,63 @@
   .strip { border:2px solid var(--line); border-radius:18px; padding:22px 30px; display:flex; justify-content:space-between; font-size:26px; font-weight:700; }
   .strip span::before { content:"✔ "; color:var(--blue); }
 </style></head><body><div class="wrap">
-  <div class="sub">값 범위 검증을 넘어, 경로·구역·전투 난이도까지 일관되게 보정합니다</div>
+  <div class="sub">LLM단 1차 보정 뒤에도 남는 구역 간격·순서·난이도까지 보정하고, 어떤 입력 경로든 같은 결과를 보장합니다</div>
   <div class="panels">
     <div class="panel">
-      <div class="tag b">BEFORE</div><h3>LLM 원본: 8자 경로, 겹친 구역, spawn-goal 근접</h3>
+      <div class="tag b">BEFORE</div><h3>LLM 출력: 길 규칙은 통과, 구역 배치는 미보장</h3>
       <svg viewBox="0 0 800 320">
-        <!-- figure-8 crossing path -->
-        <polyline points="80,250 700,70 700,250 80,70" fill="none" stroke="#9aa6bd" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>
-        <line x1="80" y1="250" x2="700" y2="70" stroke="#d4453b" stroke-width="12" stroke-linecap="round" stroke-dasharray="2 22"/>
-        <line x1="700" y1="250" x2="80" y2="70" stroke="#d4453b" stroke-width="12" stroke-linecap="round" stroke-dasharray="2 22"/>
-        <circle cx="390" cy="160" r="26" fill="none" stroke="#d4453b" stroke-width="8"/>
-        <!-- overlapping combat circles -->
-        <circle cx="520" cy="150" r="58" fill="#f6b8b3" fill-opacity=".7" stroke="#d4453b" stroke-width="5"/>
-        <circle cx="560" cy="170" r="58" fill="#f6b8b3" fill-opacity=".7" stroke="#d4453b" stroke-width="5"/>
-        <circle cx="545" cy="135" r="58" fill="#f6b8b3" fill-opacity=".7" stroke="#d4453b" stroke-width="5"/>
-        <!-- spawn/goal too close -->
-        <circle cx="80" cy="250" r="16" fill="#1f4fd6"/>
-        <circle cx="80" cy="70" r="16" fill="#d4453b"/>
-        <text x="110" y="258" font-size="22" fill="#1f4fd6" font-weight="700">spawn</text>
-        <text x="110" y="78" font-size="22" fill="#d4453b" font-weight="700">goal (거리 0.2)</text>
+        <!-- same zig-zag path in both panels: shape is kept, not straightened -->
+        <polyline points="70,190 260,70 420,250 640,110 740,240" fill="none" stroke="#9aa6bd" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>
+        <!-- touching combat circles (gap 0) -->
+        <circle cx="318" cy="135" r="36" fill="#f6b8b3" fill-opacity=".75" stroke="#d4453b" stroke-width="5"/>
+        <circle cx="372" cy="196" r="44" fill="#f6b8b3" fill-opacity=".75" stroke="#d4453b" stroke-width="5"/>
+        <!-- third combat, later on path -->
+        <circle cx="560" cy="160" r="30" fill="#f6b8b3" fill-opacity=".75" stroke="#d4453b" stroke-width="5"/>
+        <!-- array index labels out of path order + difficulty -->
+        <text x="318" y="143" font-size="20" fill="#d4453b" font-weight="800" text-anchor="middle">0.9</text>
+        <text x="372" y="204" font-size="20" fill="#d4453b" font-weight="800" text-anchor="middle">0.3</text>
+        <text x="560" y="168" font-size="20" fill="#d4453b" font-weight="800" text-anchor="middle">0.6</text>
+        <text x="318" y="86" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[2]</text>
+        <text x="372" y="262" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[0]</text>
+        <text x="560" y="118" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[1]</text>
+        <!-- gap 0 marker -->
+        <line x1="345" y1="166" x2="300" y2="236" stroke="#d4453b" stroke-width="3"/>
+        <text x="296" y="258" font-size="20" fill="#d4453b" font-weight="800" text-anchor="middle">간격 0</text>
+        <circle cx="70" cy="190" r="18" fill="#1f8a4c"/>
+        <circle cx="740" cy="240" r="18" fill="#1f4fd6"/>
+        <text x="40" y="228" font-size="22" fill="#1f8a4c" font-weight="700">spawn</text>
+        <text x="716" y="282" font-size="22" fill="#1f4fd6" font-weight="700">goal</text>
+        <text x="400" y="306" font-size="20" fill="#5d6a86" text-anchor="middle">맞닿은 구역 · 배열 순서 ≠ 경로 순서 · 난이도 0.9→0.3→0.6</text>
       </svg>
-      <span class="pill b">자기교차 · 겹침 · 근접</span>
+      <span class="pill b">간격 0 · 순서 뒤섞임 · 난이도 비단조</span>
     </div>
     <div class="panel after">
-      <div class="tag a">AFTER</div><h3>보정 후: 정합성이 보장된 레이아웃</h3>
+      <div class="tag a">AFTER</div><h3>백엔드 보정 후: 경로는 그대로, 구역은 규칙대로</h3>
       <svg viewBox="0 0 800 320">
-        <polyline points="70,270 220,230 360,150 520,120 720,60" fill="none" stroke="#1f4fd6" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>
-        <!-- evenly spaced combat circles along path, increasing difficulty -->
-        <circle cx="220" cy="230" r="34" fill="#dbe6fb" stroke="#1f4fd6" stroke-width="5"/>
-        <circle cx="360" cy="150" r="40" fill="#b9ccf5" stroke="#1f4fd6" stroke-width="5"/>
-        <circle cx="520" cy="120" r="46" fill="#8fb0f0" stroke="#1f4fd6" stroke-width="5"/>
-        <text x="220" y="238" font-size="20" fill="#1f4fd6" font-weight="800" text-anchor="middle">0.3</text>
-        <text x="360" y="158" font-size="20" fill="#1f4fd6" font-weight="800" text-anchor="middle">0.6</text>
-        <text x="520" y="128" font-size="20" fill="#fff" font-weight="800" text-anchor="middle">0.9</text>
-        <circle cx="70" cy="270" r="18" fill="#1f8a4c"/>
-        <circle cx="720" cy="60" r="18" fill="#1f4fd6"/>
-        <text x="40" y="306" font-size="22" fill="#1f8a4c" font-weight="700">spawn</text>
-        <text x="690" y="40" font-size="22" fill="#1f4fd6" font-weight="700">goal</text>
-        <text x="380" y="300" font-size="20" fill="#5d6a86" text-anchor="middle">진행도 순 정렬 · 간격 ≥ 0.06 · 난이도 ↑</text>
+        <polyline points="70,190 260,70 420,250 640,110 740,240" fill="none" stroke="#1f4fd6" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>
+        <!-- spaced along path, ordered, difficulty increasing -->
+        <circle cx="175" cy="124" r="30" fill="#dbe6fb" stroke="#1f4fd6" stroke-width="5"/>
+        <circle cx="372" cy="196" r="36" fill="#b9ccf5" stroke="#1f4fd6" stroke-width="5"/>
+        <circle cx="560" cy="160" r="42" fill="#8fb0f0" stroke="#1f4fd6" stroke-width="5"/>
+        <text x="175" y="132" font-size="20" fill="#1f4fd6" font-weight="800" text-anchor="middle">0.3</text>
+        <text x="372" y="204" font-size="20" fill="#1f4fd6" font-weight="800" text-anchor="middle">0.6</text>
+        <text x="560" y="168" font-size="20" fill="#fff" font-weight="800" text-anchor="middle">0.9</text>
+        <text x="175" y="80" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[0]</text>
+        <text x="372" y="262" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[1]</text>
+        <text x="560" y="104" font-size="19" fill="#5d6a86" font-weight="700" text-anchor="middle">areas[2]</text>
+        <!-- gap marker -->
+        <line x1="408" y1="212" x2="518" y2="172" stroke="#1f8a4c" stroke-width="3" stroke-dasharray="8 6"/>
+        <text x="470" y="250" font-size="20" fill="#1f8a4c" font-weight="800" text-anchor="middle">≥ 0.06</text>
+        <circle cx="70" cy="190" r="18" fill="#1f8a4c"/>
+        <circle cx="740" cy="240" r="18" fill="#1f4fd6"/>
+        <text x="40" y="228" font-size="22" fill="#1f8a4c" font-weight="700">spawn</text>
+        <text x="716" y="282" font-size="22" fill="#1f4fd6" font-weight="700">goal</text>
+        <text x="400" y="306" font-size="20" fill="#5d6a86" text-anchor="middle">배열 순서 = 경로 진행 순서 · 인접 간격 ≥ 0.06 · 난이도 ↑</text>
       </svg>
-      <span class="pill a">경로 순서 · 간격 · 난이도 보장</span>
+      <span class="pill a">순서 · 간격 · 난이도 보장, 결과는 항상 동일</span>
     </div>
   </div>
   <div class="strip">
-    <span>2-opt 교차 제거</span><span>시작–끝 거리 ≥ 0.45</span><span>구역 간격 ≥ 0.06</span><span>2D 겹침 0</span><span>난이도 단조 증가</span><span>멱등 · 난수 0</span>
+    <span>경로 교차·이탈 안전망</span><span>구역 간격 ≥ 0.06</span><span>배열 순서 = 경로 순서</span><span>난이도 단조 증가</span><span>결정적 · 멱등</span><span>LLM·폴백·수동 입력 공통</span>
   </div>
 </div></body></html>
