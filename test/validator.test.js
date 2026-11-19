@@ -373,3 +373,28 @@ test("V3-26 branch 포함 입력도 멱등: validate(validate(x)) === validate(x
     assert.deepEqual(validatePCGParams(once), once);
   }
 });
+
+test("V3-27 (리뷰 Important-1) 경로에서 1e-4 이내로 붙은 끝점도 반올림 후 메인 경로 위 + 멱등", () => {
+  const main = pts([0.03, 0.167], [0.4327, 0.3604], [0.3554, 0.4221], [0.1162, 0.9176], [0.2396, 0.8772], [0.8252, 0.9261], [0.97, 0.8162]);
+  const input = {
+    main_path: { normalized_points: main },
+    areas: [area("spawn", 0.03, 0.167), area("goal", 0.97, 0.8162)],
+    // 리뷰어 probe seed 20954의 원본 좌표 (끝점이 메인 경로에서 1e-4 이내 → 스냅 생략 후 반올림으로 이탈하던 경우)
+    branch_paths: [{ path_type: "shortcut", normalized_points: pts([0.9948206449393182, -0.03355042217299345], [-0.07850713618099692, 0.8235596571583301], [-0.0633275308646262, 0.5113359472714365], [0.26641786526888606, 0.8286982615012675], [0.904983862210065, 0.8654217008966951]) }],
+  };
+  const once = validatePCGParams(input);
+  const bp = once.branch_paths[0].normalized_points;
+  assert.ok(onMain(bp[bp.length - 1], once), JSON.stringify(bp[bp.length - 1]));
+  assert.deepEqual(validatePCGParams(once), once);
+});
+
+test("V3-28 (리뷰 Important-2) 지름길 진행도 차가 0.06 경계 근처여도 멱등", () => {
+  const a = 0.42475, gap = 0.048066;
+  const input = {
+    main_path: { normalized_points: pts([0.1, 0.5], [0.9, 0.5]) },
+    areas: [area("spawn", 0.1, 0.5), area("goal", 0.9, 0.5)],
+    branch_paths: [{ path_type: "shortcut", normalized_points: pts([a, 0.5], [a + gap / 2, 0.3], [a + gap, 0.5]) }],
+  };
+  const once = validatePCGParams(input);
+  assert.deepEqual(validatePCGParams(once), once);
+});

@@ -323,25 +323,30 @@ function fixBranches(input, mainPts, rep) {
       return q;
     });
     if (margined) rep.add("branch", tgt, margined, 0, `맵 가장자리 여백 ${CONFIG.edge_margin} 안으로 이동`);
+    // 스냅/방향 판정은 반올림된 좌표로 한다: 다음 validate가 보는 좌표와 같아야 멱등
+    pts = pts.map(roundPt);
 
     // 메인 경로에 연결: 이미 경로 위(반올림 오차 이내)면 그대로 둔다 → 멱등
     const snap = (idx, what) => {
       const pr = g.projectToPolyline(pts[idx], mainPts);
-      if (pr.dist > TOL) { rep.add("branch", tgt, roundPt(pts[idx]), roundPt(pr.point), `${what}을 메인 경로 위로 스냅`); pts[idx] = roundPt(pr.point); }
-      return pr.t;
+      if (pr.dist > TOL) { rep.add("branch", tgt, pts[idx], roundPt(pr.point), `${what}을 메인 경로 위로 스냅`); pts[idx] = roundPt(pr.point); }
     };
     if (type === "shortcut") {
       const tA = g.projectToPolyline(pts[0], mainPts).t, tB = g.projectToPolyline(pts[pts.length - 1], mainPts).t;
       if (tB < tA) { pts.reverse(); rep.add("branch", tgt, "backward", "forward", "지름길 진행 방향을 메인 경로와 일치(점 순서 뒤집기)"); }
     }
-    const tStart = snap(0, "분기 시작점");
-    const tEnd = type === "shortcut" ? snap(pts.length - 1, "지름길 끝점") : null;
+    snap(0, "분기 시작점");
+    if (type === "shortcut") snap(pts.length - 1, "지름길 끝점");
 
-    pts = cleanPolyline(pts.map(roundPt), rep, "branch", tgt, false);
+    pts = cleanPolyline(pts, rep, "branch", tgt, false);
     if (!pts || pts.length < 2) return drop("병합 후 점 2개 미만");
     if (g.polylineLength(pts) < C.min_length) return drop(`분기 길이 < ${C.min_length}`);
     if (g.findSelfIntersections(pts).length) return drop("자기교차 해소 실패");
-    if (type === "shortcut" && tEnd - tStart < C.min_t_gap) return drop(`지름길 양 끝 진행도 차 < ${C.min_t_gap}`);
+    // 진행도 차는 최종(반올림된) 끝점에서 다시 잰다 → 다음 validate와 같은 판정
+    if (type === "shortcut") {
+      const tS = g.projectToPolyline(pts[0], mainPts).t, tE = g.projectToPolyline(pts[pts.length - 1], mainPts).t;
+      if (tE - tS < C.min_t_gap) return drop(`지름길 양 끝 진행도 차 < ${C.min_t_gap}`);
+    }
 
     out.push({ path_type: type, path_width: round(width), normalized_points: pts.map(roundPt) });
   });
