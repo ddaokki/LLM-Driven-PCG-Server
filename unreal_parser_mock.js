@@ -1,7 +1,7 @@
 /**
  * unreal_parser_mock.js
  * 언리얼 클라이언트 APCGZoneController::ApplyZoneJsonString() (Choibw/LLMDrivenPlayablePCG,
- * Source/LLMDrivenPlayablePCG/Private/PCGZoneController.cpp, 2026-10-27 커밋 기준)의 파싱 규칙을
+ * Source/LLMDrivenPlayablePCG/Private/PCGZoneController.cpp, 2026-11-18 커밋 80a1ee1 기준)의 파싱 규칙을
  * Node로 그대로 재현한 목(mock). 백엔드 응답이 언리얼에서 실제로 읽히는지 테스트에서 확인하는 용도.
  *
  * 재현한 규칙:
@@ -11,7 +11,10 @@
  *    normalized_points 배열 필수, x/y가 숫자가 아닌 점은 건너뜀, 남은 점 2개 미만이면 실패. 좌표 [0,1] 클램프.
  *  - areas 배열 필수, 객체 아닌 항목은 건너뜀, 남은 구역 0개면 실패.
  *    area_type 미인식 → Combat. normalized_center 없으면 (0.5,0.5). radius [0.01,0.30], detail [0,1] 클램프.
- *  - 파싱 성공 후 Paths = [MainPath]. ExpectedCombatAreaCount = combat 구역 수 (모든 combat 클리어 시 goal 활성화).
+ *  - branch_paths(선택, 11-18 추가): 키가 있으면 배열 필수. 원소는 객체 필수, path_type 기본 branch,
+ *    path_width는 숫자일 때 비유한이면 실패 / 유한이면 [100,1500] 클램프, normalized_points 배열 길이 ≥ 2,
+ *    각 점은 객체 + 유한한 숫자 x/y + [0,1] 범위여야 함(클램프 없음). 하나라도 어기면 존 전체 실패.
+ *  - 파싱 성공 후 Paths = [MainPath, ...branch_paths]. ExpectedCombatAreaCount = combat 구역 수 (모든 combat 클리어 시 goal 활성화).
  *  - 알 수 없는 추가 필드(validation_report 등)는 무시된다 (TryGet* 방식).
  */
 
@@ -80,6 +83,26 @@ function applyZoneJsonString(jsonString) {
   if (data.areas.length <= 0) return { ok: false, reason: "areas 0개" };
 
   data.paths = [data.main_path];
+  if (Object.prototype.hasOwnProperty.call(root, "branch_paths")) {
+    if (!Array.isArray(root.branch_paths)) return { ok: false, reason: "branch_paths가 배열이 아님" };
+    for (let i = 0; i < root.branch_paths.length; i++) {
+      const b = root.branch_paths[i];
+      if (!isObj(b)) return { ok: false, reason: `branch_paths[${i}] 객체 아님` };
+      const bp = { path_type: typeof b.path_type === "string" ? parsePathType(b.path_type) : "branch", path_width: 500, normalized_points: [] };
+      if (typeof b.path_width === "number") {
+        if (!Number.isFinite(b.path_width)) return { ok: false, reason: `branch_paths[${i}].path_width 비유한` };
+        bp.path_width = clamp(b.path_width, 100, 1500);
+      }
+      if (!Array.isArray(b.normalized_points) || b.normalized_points.length < 2) return { ok: false, reason: `branch_paths[${i}] 점 2개 미만` };
+      for (const p of b.normalized_points) {
+        if (!isObj(p) || !isNum(p.x) || !isNum(p.y) || p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1) {
+          return { ok: false, reason: `branch_paths[${i}] 좌표 비정상: ${JSON.stringify(p)}` };
+        }
+        bp.normalized_points.push({ x: p.x, y: p.y });
+      }
+      data.paths.push(bp);
+    }
+  }
   data.expected_combat_area_count = data.areas.filter((a) => a.area_type === "combat").length;
   return { ok: true, data };
 }

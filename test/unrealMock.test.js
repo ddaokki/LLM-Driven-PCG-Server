@@ -65,3 +65,45 @@ test("UE-MOCK-08 combat 개수 = 예상 전투 구역 수(ExpectedCombatAreaCoun
   assert.equal(r.ok, true);
   assert.equal(r.data.expected_combat_area_count, 3);
 });
+
+// ---- 11-18(80a1ee1) branch_paths 규칙
+// 언리얼 LoadSampleZoneJson()의 샘플 그대로 (desert, danger 1, combat 2, shortcut 1)
+const sample = () => JSON.parse(JSON.stringify(require("./fixtures/unreal_sample_1118.json")));
+const withBranch = (b) => { const z = sample(); z.branch_paths = b; return JSON.stringify(z); };
+
+test("UM-B1 언리얼 11-18 샘플(shortcut 1개) → 파싱 성공, paths = [main, shortcut]", () => {
+  const r = applyZoneJsonString(JSON.stringify(sample()));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.data.paths.length, 2);
+  assert.equal(r.data.paths[1].path_type, "shortcut");
+  assert.equal(r.data.paths[1].path_width, 480);
+  assert.equal(r.data.paths[1].normalized_points.length, 5);
+});
+
+test("UM-B2 branch_paths가 배열이 아님 → 존 전체 실패", () => {
+  assert.equal(applyZoneJsonString(withBranch({})).ok, false);
+  assert.equal(applyZoneJsonString(withBranch(null)).ok, false);
+});
+
+test("UM-B3 branch 원소가 객체 아님 / 점 1개 → 존 전체 실패", () => {
+  assert.equal(applyZoneJsonString(withBranch([1])).ok, false);
+  assert.equal(applyZoneJsonString(withBranch([{ normalized_points: [{ x: 0.5, y: 0.5 }] }])).ok, false);
+});
+
+test("UM-B4 branch 좌표가 [0,1] 밖 → 클램프 없이 존 전체 실패", () => {
+  assert.equal(applyZoneJsonString(withBranch([{ normalized_points: [{ x: 0.5, y: 0.5 }, { x: 1.2, y: 0.5 }] }])).ok, false);
+});
+
+test("UM-B5 branch 좌표가 숫자 아님 → 존 전체 실패", () => {
+  assert.equal(applyZoneJsonString(withBranch([{ normalized_points: [{ x: 0.5, y: 0.5 }, { x: "0.7", y: 0.5 }] }])).ok, false);
+});
+
+test("UM-B6 branch path_width가 숫자 아님 → 무시하고 기본 폭, 빈 배열 → 성공(main만)", () => {
+  const r = applyZoneJsonString(withBranch([{ path_width: "wide", normalized_points: [{ x: 0.5, y: 0.5 }, { x: 0.7, y: 0.5 }] }]));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.data.paths[1].path_type, "branch");
+  assert.equal(typeof r.data.paths[1].path_width, "number");
+  const r2 = applyZoneJsonString(withBranch([]));
+  assert.equal(r2.ok, true);
+  assert.equal(r2.data.paths.length, 1);
+});
