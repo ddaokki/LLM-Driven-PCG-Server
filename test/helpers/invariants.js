@@ -77,6 +77,28 @@ function checkInvariants(zone, cfg = {}) {
       push(d >= areas[i].normalized_radius + areas[j].normalized_radius - TOL, `areas ${i},${j} overlap d=${d.toFixed(4)}`);
     }
   }
+  // 분기 경로(언리얼 11-18 branch_paths): 있으면 언리얼이 존 전체를 거부하지 않을 형태여야 한다
+  if ("branch_paths" in zone) {
+    const bps = zone.branch_paths;
+    push(Array.isArray(bps) && bps.length >= 1 && bps.length <= 2, `branch_paths count: ${Array.isArray(bps) ? bps.length : typeof bps}`);
+    for (const [i, b] of (Array.isArray(bps) ? bps : []).entries()) {
+      push(b.path_type === "branch" || b.path_type === "shortcut", `branch ${i} type ${b.path_type}`);
+      push(typeof b.path_width === "number" && b.path_width >= 100 && b.path_width <= 1500, `branch ${i} width ${b.path_width}`);
+      const bp = Array.isArray(b.normalized_points) ? b.normalized_points : [];
+      push(bp.length >= 2 && bp.length <= maxPoints, `branch ${i} point count ${bp.length}`);
+      for (const p of bp) push(p && typeof p.x === "number" && typeof p.y === "number" && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1, `branch ${i} point ${JSON.stringify(p)}`);
+      push(g.findSelfIntersections(bp).length === 0, `branch ${i} self-intersects`);
+      if (bp.length >= 2 && pts.length >= 2) {
+        const s = g.projectToPolyline(bp[0], pts);
+        push(s.dist <= TOL, `branch ${i} start off main path ${s.dist.toFixed(5)}`);
+        if (b.path_type === "shortcut") {
+          const e = g.projectToPolyline(bp[bp.length - 1], pts);
+          push(e.dist <= TOL, `shortcut ${i} end off main path ${e.dist.toFixed(5)}`);
+          push(e.t > s.t, `shortcut ${i} runs backward`);
+        }
+      }
+    }
+  }
   // 난이도 곡선: combat detail_density 단조 비감소
   const combats = areas.filter((a) => a.area_type === "combat");
   for (let i = 1; i < combats.length; i++) {

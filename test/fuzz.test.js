@@ -4,12 +4,15 @@
  *  - 예외 0건
  *  - 불변식(test/helpers/invariants.js) 100% 통과
  *  - 멱등성(validate∘validate = validate) 100%
+ *  - 언리얼 11-18 목 파서 파싱 성공 100% (branch_paths 포함)
  * 를 확인한다. LLM 테스트 명세 LLM-T06(무작위 입력 강건성)의 백엔드 판 (BE-FUZZ).
+ * seed의 약 1/3에는 망가진 branch_paths도 넣는다(기존 입력 생성 순서 뒤에 뽑아 기존 seed 입력은 그대로).
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { validatePCGParams } = require("../validator");
 const { checkInvariants } = require("./helpers/invariants");
+const { applyZoneJsonString } = require("../unreal_parser_mock");
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -33,6 +36,23 @@ function junkNumber(rnd, lo, hi) {
   if (r < 0.2) return NaN;
   if (r < 0.22) return undefined;
   return lo + rnd() * (hi - lo);
+}
+
+const PATH_TYPES = ["branch", "shortcut", "SHORTCUT", "main", "river", null, 5];
+function randomBranches(rnd) {
+  const r = rnd();
+  if (r < 0.06) return "junk";
+  if (r < 0.1) return { normalized_points: [] };
+  const list = [];
+  const n = Math.floor(rnd() * 5);           // 0~4
+  for (let i = 0; i < n; i++) {
+    if (rnd() < 0.08) { list.push(rnd() < 0.5 ? null : 42); continue; }
+    const nPts = Math.floor(rnd() * 8);       // 0~7
+    const points = [];
+    for (let k = 0; k < nPts; k++) points.push(rnd() < 0.05 ? "p" : { x: junkNumber(rnd, -0.2, 1.2), y: junkNumber(rnd, -0.2, 1.2) });
+    list.push({ path_type: PATH_TYPES[Math.floor(rnd() * PATH_TYPES.length)], path_width: junkNumber(rnd, -100, 3000), normalized_points: rnd() < 0.05 ? "x" : points });
+  }
+  return list;
 }
 
 function randomInput(seed) {
@@ -59,6 +79,7 @@ function randomInput(seed) {
   const path = { path_type: "main", path_width: junkNumber(rnd, -100, 3000), normalized_points: rnd() < 0.05 ? "x" : points };
   const base = { theme: THEMES[Math.floor(rnd() * THEMES.length)], areas: rnd() < 0.05 ? "nope" : areas };
   if (rnd() < 0.3) base.combat_count = Math.floor(rnd() * 8) - 1;
+  if (rnd() < 0.33) base.branch_paths = randomBranches(rnd);
   return nested ? { ...base, base_environment: dens, main_path: path } : { ...base, ...dens, ...path };
 }
 
@@ -79,6 +100,8 @@ test("BE-FUZZ 무작위 입력 2000건: 예외 0, 불변식 100%, 멱등성 100%
     totalCorrections += rep.correction_count; totalHard += rep.hard_violations_before; scoreSum += rep.quality_score;
     const problems = checkInvariants(zone);
     if (problems.length) failures.push({ seed, problems });
+    const parsed = applyZoneJsonString(JSON.stringify(zone));
+    if (!parsed.ok) failures.push({ seed, unreal: parsed.reason });
     const again = validatePCGParams(zone);
     try { assert.deepEqual(again, zone); } catch (e) { failures.push({ seed, idempotency: e.message.slice(0, 400) }); }
   }
