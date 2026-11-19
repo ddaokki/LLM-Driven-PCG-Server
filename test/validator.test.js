@@ -295,3 +295,81 @@ test("V3-18 (리뷰 Important-3) areas 80,000개 + combat_count 0 → 1초 이�
   validatePCGParams({ main_path: { normalized_points: Array.from({ length: 50000 }, (_, i) => ({ x: (i % 100) / 100, y: ((i * 7) % 100) / 100 })) } });
   assert.ok(Date.now() - t1 < 1000, `points took ${Date.now() - t1}ms`);
 });
+
+// ---------------------------------------------------------------- branch_paths (언리얼 11-18)
+const { applyZoneJsonString } = require("../unreal_parser_mock");
+const unrealSample = () => JSON.parse(JSON.stringify(require("./fixtures/unreal_sample_1118.json")));
+const onMain = (p, zone) => g.projectToPolyline(p, zone.main_path.normalized_points).dist <= 1e-4 + 1e-9;
+const tOnMain = (p, zone) => g.projectToPolyline(p, zone.main_path.normalized_points).t;
+const straightMain = { normalized_points: pts([0.05, 0.5], [0.5, 0.5], [0.95, 0.5]) };
+const mainWith = (branch_paths) => ({ main_path: straightMain, areas: [area("spawn", 0.05, 0.5), area("goal", 0.95, 0.5)], branch_paths });
+
+test("V3-19 언리얼 11-18 샘플 → shortcut 1개 유지, 양 끝 메인 경로 위, 언리얼 파서 통과", () => {
+  const z = validatePCGParams(unrealSample());
+  assert.equal(z.branch_paths.length, 1);
+  const b = z.branch_paths[0];
+  assert.equal(b.path_type, "shortcut");
+  assert.equal(b.path_width, 480);
+  assert.ok(onMain(b.normalized_points[0], z), "start not on main");
+  assert.ok(onMain(b.normalized_points[b.normalized_points.length - 1], z), "end not on main");
+  const r = applyZoneJsonString(JSON.stringify(z));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.data.paths.length, 2);
+  expectInvariants(z);
+});
+
+test("V3-20 branch 좌표가 문자열/음수/1 초과 → 여백 안으로 보정, 언리얼 파서 통과", () => {
+  const z = validatePCGParams(mainWith([{ normalized_points: [{ x: "0.3", y: 0.5 }, { x: -0.2, y: 0.1 }, { x: 1.4, y: -0.3 }] }]));
+  assert.equal(z.branch_paths.length, 1);
+  for (const p of z.branch_paths[0].normalized_points) assert.ok(p.x >= 0.03 && p.x <= 0.97 && p.y >= 0.03 && p.y <= 0.97, JSON.stringify(p));
+  assert.equal(z.branch_paths[0].path_type, "branch");
+  assert.equal(z.branch_paths[0].path_width, CONFIG.branch.width_def);
+  assert.equal(applyZoneJsonString(JSON.stringify(z)).ok, true);
+});
+
+test("V3-21 branch_paths가 배열 아님 → 키 없이 정상 존, 객체/문자열은 리포트에 기록", () => {
+  for (const bad of [{}, "x", null]) {
+    const { zone, report } = validateWithReport(mainWith(bad));
+    assert.equal("branch_paths" in zone, false);
+    if (bad !== null) assert.ok(report.corrections.some((c) => c.step === "branch"), JSON.stringify(bad));
+  }
+});
+
+test("V3-22 유효 분기 3개 → 앞 2개만", () => {
+  const b = (y) => ({ normalized_points: pts([0.3, 0.5], [0.4, y]) });
+  const { zone, report } = validateWithReport(mainWith([b(0.8), b(0.2), b(0.85)]));
+  assert.equal(zone.branch_paths.length, CONFIG.branch.max);
+  assert.ok(report.corrections.some((c) => c.step === "branch"));
+});
+
+test("V3-23 shortcut 끝점이 메인 진행도상 시작점보다 앞 → 점 순서 뒤집어 진행 방향 일치", () => {
+  const z = validatePCGParams(mainWith([{ path_type: "shortcut", normalized_points: pts([0.8, 0.5], [0.5, 0.75], [0.2, 0.5]) }]));
+  const bp = z.branch_paths[0].normalized_points;
+  assert.ok(tOnMain(bp[0], z) < tOnMain(bp[bp.length - 1], z));
+  assert.ok(onMain(bp[0], z) && onMain(bp[bp.length - 1], z));
+});
+
+test("V3-24 점 1개 / 길이 0.1 미만 / 객체 아님 → 그 분기만 버리고 이유 기록", () => {
+  const good = { normalized_points: pts([0.3, 0.5], [0.4, 0.8]) };
+  const { zone, report } = validateWithReport(mainWith([
+    { normalized_points: pts([0.3, 0.5]) },
+    { normalized_points: pts([0.3, 0.5], [0.33, 0.52]) },
+    42,
+    good,
+  ]));
+  assert.equal(zone.branch_paths.length, 1);
+  assert.equal(report.corrections.filter((c) => c.step === "branch" && c.after === "dropped").length, 3);
+});
+
+test("V3-25 branch_paths 없는 입력 → 응답에 키 자체가 없음(기존 계약 불변)", () => {
+  assert.equal("branch_paths" in validatePCGParams(null), false);
+  assert.equal("branch_paths" in validatePCGParams({ main_path: straightMain }), false);
+  assert.equal("branch_paths" in validatePCGParams(mainWith([])), false);
+});
+
+test("V3-26 branch 포함 입력도 멱등: validate(validate(x)) === validate(x)", () => {
+  for (const input of [unrealSample(), mainWith([{ path_type: "shortcut", normalized_points: pts([0.8, 0.5], [0.5, 0.75], [0.2, 0.5]) }])]) {
+    const once = validatePCGParams(input);
+    assert.deepEqual(validatePCGParams(once), once);
+  }
+});

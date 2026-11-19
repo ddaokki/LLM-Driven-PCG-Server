@@ -14,6 +14,8 @@
  *     실제 효과도 없었다. 증명: 멱등+단조+연속인 1변수 함수는 하드 클램프뿐.)
  *  - 최소 수정: 규칙을 어긴 경우에만, 어긴 만큼만 움직인다. LLM이 정한 모양/비율/순서를 최대한 보존.
  *  - 응답 계약 불변: 최상위 theme/base_environment/main_path/areas. debug일 때만 validation_report 추가.
+ *    branch_paths(언리얼 11-18 선택 필드)는 유효한 분기가 있을 때만 붙는다. 언리얼은 분기 하나만 깨져도
+ *    존 전체를 거부하므로, 고칠 수 없는 분기는 버린다.
  */
 
 const g = require("./lib/geometry");
@@ -34,6 +36,7 @@ const CONFIG = {
   circle_pad: 0.01,           // 원 사이 최소 여유
   radius: { min: 0.01, max: 0.3, def: 0.05 },
   max_areas: 8,
+  branch: { max: 2, width_def: 400, min_length: 0.1, min_t_gap: 0.06 }, // 분기/지름길 (shortcut은 양 끝이 메인 경로 위)
   default_path_points: [
     { x: 0.05, y: 0.6 },
     { x: 0.5, y: 0.45 },
@@ -85,6 +88,7 @@ function normalizeInput(aiData) {
   const rawPointsAll = pick(mp.normalized_points, d.normalized_points);
   const rawPoints = Array.isArray(rawPointsAll) ? rawPointsAll.slice(0, INPUT_CAP.points) : rawPointsAll;
   const rawAreas = Array.isArray(d.areas) ? d.areas.slice(0, INPUT_CAP.areas) : d.areas;
+  const toPoints = (raw) => raw.slice(0, INPUT_CAP.points).map((p) => (isObj(p) ? { x: toNumber(p.x), y: toNumber(p.y) } : null));
   return {
     theme: typeof d.theme === "string" ? d.theme.trim().toLowerCase() : null,
     tree: toNumber(pick(be.tree_density, d.tree_density)),
@@ -108,6 +112,18 @@ function normalizeInput(aiData) {
         })
       : null,
     combatCount: toNumber(d.combat_count),
+    // null = 키 없음/null, "array" = 배열, 그 외 = 무시할 타입 이름
+    branchesKind: d.branch_paths === undefined || d.branch_paths === null ? null : Array.isArray(d.branch_paths) ? "array" : typeof d.branch_paths,
+    branches: Array.isArray(d.branch_paths)
+      ? d.branch_paths.slice(0, INPUT_CAP.areas).map((b) => {
+          if (!isObj(b)) return null;
+          return {
+            type: typeof b.path_type === "string" ? b.path_type.trim().toLowerCase() : null,
+            width: toNumber(b.path_width),
+            points: Array.isArray(b.normalized_points) ? toPoints(b.normalized_points) : null,
+          };
+        })
+      : null,
   };
 }
 
@@ -216,19 +232,31 @@ function fixPath(input, rep) {
   if (xBefore) rep.hard("path", `자기교차 ${xBefore}건`);
   if (g.dist(pts[0], pts[pts.length - 1]) < CONFIG.min_spawn_goal - TOL) rep.hard("path", `spawn-goal 거리 ${round(g.dist(pts[0], pts[pts.length - 1]))} < ${CONFIG.min_spawn_goal}`);
 
-  // 기하 보정 루프: 각 단계가 다른 단계의 전제를 깰 수 있으므로 안정될 때까지 반복
+  pts = cleanPolyline(pts, rep, "path", "normalized_points", true);
+  if (!pts) return useDefault("병합 후 점 부족 → 기본 경로");
+  if (pts.length < 2 || g.findSelfIntersections(pts).length) return useDefault("기하 보정 실패 → 기본 경로");
+  return pts;
+}
+
+/**
+ * 경로 기하 보정 루프(메인/분기 공용): 근접점 병합 → 2-opt 교차 해소 → 급회전 완화/제거
+ * (→ pushEnds면 spawn-goal 거리 확보). 각 단계가 다른 단계의 전제를 깰 수 있으므로 안정될 때까지 반복.
+ * 양 끝점은 pushEnds일 때만 움직인다. 점이 2개 미만이 되면 null.
+ */
+function cleanPolyline(pts, rep, step, target, pushEnds) {
+  const lo = CONFIG.edge_margin, hi = 1 - CONFIG.edge_margin;
   for (let round_ = 0; round_ < 6; round_++) {
     let changed = false;
 
     const merged = g.mergeClosePoints(pts, CONFIG.merge_eps);
     if (merged.length !== pts.length) {
-      rep.add("path", "normalized_points", pts.length, merged.length, `근접(<${CONFIG.merge_eps}) 중복점 병합`);
+      rep.add(step, target, pts.length, merged.length, `근접(<${CONFIG.merge_eps}) 중복점 병합`);
       pts = merged; changed = true;
     }
-    if (pts.length < 2) return useDefault("병합 후 점 부족 → 기본 경로");
+    if (pts.length < 2) return null;
 
     const un = g.untangle(pts, 30);
-    if (un.flips) { rep.add("path", "normalized_points", "crossing", "untangled", `2-opt 구간 뒤집기 ${un.flips}회로 자기교차 해소`); pts = un.points; changed = true; }
+    if (un.flips) { rep.add(step, target, "crossing", "untangled", `2-opt 구간 뒤집기 ${un.flips}회로 자기교차 해소`); pts = un.points; changed = true; }
 
     // 급회전: 몇 번 완화해보고 그래도 안 풀리면 꼭짓점 제거
     let relaxed = 0, removed = 0;
@@ -242,17 +270,82 @@ function fixPath(input, rep) {
       if (idx < 0) break;
       pts = pts.filter((_, i) => i !== idx); removed++;
     }
-    if (relaxed || removed) { rep.add("path", "normalized_points", "hairpin", "relaxed", `급회전(<${CONFIG.min_turn_deg}°) 완화 ${relaxed}회, 제거 ${removed}점`); changed = true; }
+    if (relaxed || removed) { rep.add(step, target, "hairpin", "relaxed", `급회전(<${CONFIG.min_turn_deg}°) 완화 ${relaxed}회, 제거 ${removed}점`); changed = true; }
 
-    const pushed = g.pushEndpointsApart(pts, CONFIG.min_spawn_goal, { target: CONFIG.min_spawn_goal + MARGIN, lo, hi, tol: TOL });
-    if (pushed.moved) { rep.add("path", "spawn-goal", round(g.dist(pts[0], pts[pts.length - 1])), CONFIG.min_spawn_goal, "spawn-goal 최소 거리 확보(양 끝점 반대 방향으로 이동)"); pts = pushed.points; changed = true; }
+    if (pushEnds) {
+      const pushed = g.pushEndpointsApart(pts, CONFIG.min_spawn_goal, { target: CONFIG.min_spawn_goal + MARGIN, lo, hi, tol: TOL });
+      if (pushed.moved) { rep.add("path", "spawn-goal", round(g.dist(pts[0], pts[pts.length - 1])), CONFIG.min_spawn_goal, "spawn-goal 최소 거리 확보(양 끝점 반대 방향으로 이동)"); pts = pushed.points; changed = true; }
+    }
 
     pts = pts.map((p) => ({ x: g.clamp(p.x, lo, hi), y: g.clamp(p.y, lo, hi) }));
     pts = pts.map(roundPt);
     if (!changed) break;
   }
-  if (pts.length < 2 || g.findSelfIntersections(pts).length) return useDefault("기하 보정 실패 → 기본 경로");
   return pts;
+}
+
+// ---------------------------------------------------------------- 3b. 분기 경로 (branch_paths)
+/**
+ * 분기/지름길 보정. 메인 경로가 확정된 뒤 실행한다.
+ *  - 첫 점은 메인 경로 최근접점으로 스냅(분기는 메인에서 갈라진다). shortcut은 끝점도 스냅하고,
+ *    진행도가 거꾸로면 점 순서를 뒤집어 메인과 같은 방향으로 맞춘다.
+ *  - 나머지 기하는 메인과 같은 루프(spawn-goal 거리 규칙만 제외). 헬퍼들이 양 끝점을 보존하므로 스냅이 유지된다.
+ *  - 고칠 수 없는 분기는 버린다(언리얼은 분기 하나만 깨져도 존 전체 실패).
+ */
+function fixBranches(input, mainPts, rep) {
+  if (input.branchesKind === null) return [];
+  if (input.branchesKind !== "array") {
+    rep.add("branch", "branch_paths", input.branchesKind, "ignored", "배열이 아닌 branch_paths 무시");
+    return [];
+  }
+  const C = CONFIG.branch;
+  const lo = CONFIG.edge_margin, hi = 1 - CONFIG.edge_margin;
+  const out = [];
+  input.branches.forEach((b, i) => {
+    const tgt = `branch_paths[${i}]`;
+    const drop = (why) => rep.add("branch", tgt, "branch", "dropped", why);
+    if (!b) return drop("객체가 아닌 분기");
+    if (out.length >= C.max) return rep.add("branch", tgt, "branch", "dropped", `분기 상한 ${C.max}개 초과`);
+
+    const type = b.type === "shortcut" ? "shortcut" : "branch";
+    if (b.type !== null && b.type !== type) rep.add("branch", `${tgt}.path_type`, b.type, type, "branch/shortcut 외 값 → branch");
+
+    let width = b.width === null ? C.width_def : g.clamp(b.width, CONFIG.path_width.min, CONFIG.path_width.max);
+    if (b.width !== null && width !== b.width) rep.add("branch", `${tgt}.path_width`, b.width, width, `[${CONFIG.path_width.min}, ${CONFIG.path_width.max}] 클램프`);
+
+    let pts = (b.points || []).filter((p) => p && p.x !== null && p.y !== null);
+    if (pts.length > CONFIG.points.max) pts = pts.slice(0, CONFIG.points.max);
+    if (pts.length < 2) return drop("숫자 좌표 점 2개 미만");
+    let margined = 0;
+    pts = pts.map((p) => {
+      const q = { x: g.clamp(p.x, lo, hi), y: g.clamp(p.y, lo, hi) };
+      if (q.x !== p.x || q.y !== p.y) margined++;
+      return q;
+    });
+    if (margined) rep.add("branch", tgt, margined, 0, `맵 가장자리 여백 ${CONFIG.edge_margin} 안으로 이동`);
+
+    // 메인 경로에 연결: 이미 경로 위(반올림 오차 이내)면 그대로 둔다 → 멱등
+    const snap = (idx, what) => {
+      const pr = g.projectToPolyline(pts[idx], mainPts);
+      if (pr.dist > TOL) { rep.add("branch", tgt, roundPt(pts[idx]), roundPt(pr.point), `${what}을 메인 경로 위로 스냅`); pts[idx] = roundPt(pr.point); }
+      return pr.t;
+    };
+    if (type === "shortcut") {
+      const tA = g.projectToPolyline(pts[0], mainPts).t, tB = g.projectToPolyline(pts[pts.length - 1], mainPts).t;
+      if (tB < tA) { pts.reverse(); rep.add("branch", tgt, "backward", "forward", "지름길 진행 방향을 메인 경로와 일치(점 순서 뒤집기)"); }
+    }
+    const tStart = snap(0, "분기 시작점");
+    const tEnd = type === "shortcut" ? snap(pts.length - 1, "지름길 끝점") : null;
+
+    pts = cleanPolyline(pts.map(roundPt), rep, "branch", tgt, false);
+    if (!pts || pts.length < 2) return drop("병합 후 점 2개 미만");
+    if (g.polylineLength(pts) < C.min_length) return drop(`분기 길이 < ${C.min_length}`);
+    if (g.findSelfIntersections(pts).length) return drop("자기교차 해소 실패");
+    if (type === "shortcut" && tEnd - tStart < C.min_t_gap) return drop(`지름길 양 끝 진행도 차 < ${C.min_t_gap}`);
+
+    out.push({ path_type: type, path_width: round(width), normalized_points: pts.map(roundPt) });
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------- 4~5. 구역 타입/값 + 구조 보장
@@ -533,6 +626,7 @@ function validateWithReport(aiData, options = {}) {
   pathWidth = round(pathWidth);
 
   const pathPts = fixPath(input, rep);
+  const branches = fixBranches(input, pathPts, rep);
   const combatCountOpt = options.combatCount !== undefined ? options.combatCount : (input.combatCount !== null ? input.combatCount : undefined);
   const areas = fixAreas(input, pathPts, rep, combatCountOpt);
   const ordered = layoutAreas(areas, pathPts, rep);
@@ -549,6 +643,7 @@ function validateWithReport(aiData, options = {}) {
       detail_density: round(a.detail),
     })),
   };
+  if (branches.length) zone.branch_paths = branches;
   return { zone, report: rep.toJSON() };
 }
 
