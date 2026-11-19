@@ -92,7 +92,7 @@ function main() {
   md.push(`| 실행 환경 | Node.js ${process.version}, ${process.platform} ${process.arch} |`);
   md.push("| 러너 | Node 내장 `node:test` + `assert/strict` (추가 의존성 없음) |");
   md.push(`| 대상 코드 | https://github.com/ddaokki/LLM-Driven-PCG-Server — 커밋 \`${git.commit}\` |`);
-  md.push("| 언리얼 계약 기준 | Choibw/LLMDrivenPlayablePCG `PCGZoneController.cpp` 2026-10-27 커밋 (Area 액터 자동 생성, 전 combat 클리어 시 goal 활성화) |");
+  md.push("| 언리얼 계약 기준 | Choibw/LLMDrivenPlayablePCG `PCGZoneController.cpp` 2026-11-18 커밋 `80a1ee1` (Area 액터 자동 생성, 전 combat 클리어 시 goal 활성화, `branch_paths`·`danger`·`path_width` 반영) |");
   md.push("| 입력 방식 | `validatePCGParams()` 직접 호출 / 임시 포트 HTTP 서버에 fetch |");
   md.push("| 확인 수단 | assert, 불변식 검사기(`test/helpers/invariants.js`), 언리얼 목 파서(`unreal_parser_mock.js`) |");
   md.push("| Redis | API 테스트는 의도적으로 미연결(포트 1) 상태에서 실행(BE-T09). 세션 테스트는 로컬 Redis 있을 때만 실행 |");
@@ -103,6 +103,7 @@ function main() {
   md.push(`| 총 항목 | 통과 | 실패 | 건너뜀 | 판정 |`);
   md.push(`|---|---|---|---|---|`);
   md.push(`| ${all.length} | ${pass} | ${fail} | ${skip} | **${fail === 0 ? "전체 통과" : "실패 있음"}** |`);
+  if (skip) { md.push(""); md.push(`> 건너뜀 ${skip}건은 Redis가 필요한 세션 테스트(SESSION-xx)다. 이 결과서를 생성한 환경에 Redis가 없어 실행되지 않았다(로컬 Redis 기동 후 \`npm test\`로 재실행 가능).`); }
   md.push("");
   if (fuzz) {
     const kv = Object.fromEntries(fuzz.fuzzStats.split(/\s+/).map((p) => p.split("=")));
@@ -131,9 +132,9 @@ function main() {
   md.push("## 5. 명세서 대비 변경/비고");
   md.push("");
   md.push("- BE-T02(soft clamp): 1차의 tanh 소프트 클램프는 제거했다. 테마별 하드 클램프에 항상 지배되어 실제 효과가 없었고, 멱등성(보정 결과를 다시 넣어도 동일)과 수학적으로 양립할 수 없기 때문이다. 판정 기준을 \"상한 초과값이 테마 상한으로 보정되고 리포트에 기록되면 통과\"로 재해석했다.");
-  md.push("- BE-T10(언리얼 파서 시뮬레이션): 명세서에 언급만 되어 있던 `unreal_parser_mock.js`를 실제로 작성했다(10/27 언리얼 커밋 기준). API 테스트의 모든 응답이 이 목 파서를 통과한다.");
+  md.push("- BE-T10(언리얼 파서 시뮬레이션): 명세서에 언급만 되어 있던 `unreal_parser_mock.js`를 실제로 작성했고 11/18 언리얼 커밋(`80a1ee1`) 기준으로 갱신했다(`branch_paths` 규칙, UM-B1~B6). API 테스트와 fuzz 2,000건의 모든 응답이 이 목 파서를 통과한다.");
   md.push("- BE-T12: 구역 정렬 기준을 x좌표에서 경로 진행도(호길이)로 바꿨다. 위→아래, 오른쪽→왼쪽으로 진행하는 경로에서도 \"배열 순서 = 경로상 순서\"가 성립한다(V3-09).");
-  md.push("- 신규: 경로 기하(자기교차·급회전·spawn-goal 거리), 경로-구역 결합(spawn/goal 스냅, combat 경로 근접), 2D 겹침, 테마 4종, 난이도 곡선, 멱등성, dialogue 해석, LLM 폴백, Redis 장애 허용 항목을 추가했다.");
+  md.push("- 신규: 경로 기하(자기교차·급회전·spawn-goal 거리), 경로-구역 결합(spawn/goal 스냅, combat 경로 근접), 2D 겹침, 테마 4종, 난이도 곡선, 멱등성, dialogue 해석, LLM 폴백, Redis 장애 허용 항목을 추가했다. 11/18 언리얼 분기 경로 대응으로 `branch_paths` 보정(V3-19~26)을 추가했다.");
   md.push("- 미수행: 실제 vLLM 서버 대상 생성 품질(LLM 파트 서버 미기동), 언리얼 에디터 실연동(언리얼 파트 일정). 두 항목은 2차 테스트 결과서(최종발표)에서 수행한다.");
   md.push("");
   fs.mkdirSync(path.dirname(OUT_MD), { recursive: true });

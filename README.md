@@ -10,7 +10,7 @@ dialogue ──► 후보 Zone 생성 (vLLM | 규칙 기반 해석기) ──►
 - **validator v3**: LLM이 낸 값을 "범위만 맞추는" 수준이 아니라 경로 기하·경로-구역 결합·2D 겹침·테마·난이도까지 보정해서, 어떤 입력이 와도 언리얼이 그대로 읽을 수 있는 유효한 존을 만든다. 결정적(난수 없음)이고 멱등(결과를 다시 넣어도 그대로)이다.
 - **dialogue 파이프라인**: vLLM(OpenAI 호환, JSON Schema 강제)이 있으면 호출하고, 없거나 실패/타임아웃이면 규칙 기반 해석기가 대화에서 테마·밀도·길 모양·전투 수·강도를 뽑아 후보 존을 만든다. GPU 없이도 "대화가 바뀌면 존이 바뀌는" 시연이 된다.
 - **장애 허용**: Redis가 없어도 `/generate-zone`은 정상. LLM 서버가 죽어도 응답은 항상 유효한 존.
-- **테스트**: 테스트 명세서 BE-T01~T12를 포함한 자동화 테스트 98건 + 무작위 입력 2,000건 fuzz. `npm run test:report`로 결과서(md/docx) 자동 생성.
+- **테스트**: 테스트 명세서 BE-T01~T12를 포함한 자동화 테스트 112건(Redis 없으면 세션 4건 건너뜀) + 무작위 입력 2,000건 fuzz(언리얼 목 파서 통과 포함). `npm run test:report`로 결과서(md/docx) 자동 생성.
 
 ## 요구사항
 
@@ -51,7 +51,7 @@ curl http://127.0.0.1:8000/health
 
 ## 언리얼 클라이언트 연동
 
-### 계약 (Choibw/LLMDrivenPlayablePCG `PCGZoneController.cpp` 2026-10-27 기준)
+### 계약 (Choibw/LLMDrivenPlayablePCG `PCGZoneController.cpp` 2026-11-18 `80a1ee1` 기준)
 
 언리얼 `APCGZoneController::RequestZoneDataFromBackend`는 아래 POST 한 번을 보내고, 응답 body를 **그대로** Zone JSON으로 파싱한다. 봉투로 감싸면 안 된다.
 
@@ -103,6 +103,7 @@ Content-Type: application/json
 | 구역 | spawn 정확히 1개(areas[0], 경로 시작점) · goal 정확히 1개(areas[마지막], 경로 끝점) |
 | 배치 | 배열 순서 = 경로 진행도 순서, 인접 구역 진행도 간격 ≥ 0.06, combat 가장자리~경로 ≤ 0.12, 원끼리 겹침 0 (예외: 경로가 접혀 두 중심이 0.03 미만으로 붙는 극단 입력에서는 언리얼 최소 반지름 0.01 때문에 ≤0.02 겹침이 남을 수 있음 — 적대적 입력 18,000건 중 48건) |
 | 난이도 | combat `detail_density`가 진행 방향으로 단조 비감소 |
+| 분기 | `branch_paths`는 입력에 유효한 분기가 있을 때만 붙음(없으면 키 자체 없음). 1~2개, type `branch`/`shortcut`, 폭 100~1500, 점 2~12·좌표 [0,1], 자기교차 0, 시작점은 메인 경로 위, shortcut은 끝점도 메인 경로 위·진행 방향 일치 |
 | 멱등 | `validate(validate(x)) === validate(x)` |
 
 ### 언리얼 10/27 변경과의 관계
@@ -110,6 +111,13 @@ Content-Type: application/json
 - Area PCG 액터가 **자동 생성**되므로 "레벨에 액터 수를 맞춰야 한다"는 제약이 없어졌다. 백엔드는 combat 0~6개를 자유롭게 보낸다.
 - **모든 combat 구역을 클리어해야 goal이 활성화**된다(`ExpectedCombatAreaCount` = combat 수). 그래서 validator가 combat 개수를 입력과 일치시키고, 난이도를 진행 순으로 정렬하는 것이 플레이 흐름과 직접 연결된다.
 - 언리얼 파싱 규칙은 `unreal_parser_mock.js`에 그대로 재현되어 있고, API 테스트의 모든 응답이 이 목 파서를 통과한다.
+
+### 언리얼 11/18 변경과의 관계
+
+- 선택 필드 `branch_paths`(분기/지름길) 추가. 언리얼은 이 배열의 원소 하나만 잘못돼도(객체 아님, 점 2개 미만, 좌표가 숫자가 아니거나 [0,1] 밖) **존 전체를 거부**한다. 그래서 validator가 분기를 보정하고, 고칠 수 없는 분기는 버린다(`?debug=1` 리포트에 이유). 언리얼 자체 샘플(`LoadSampleZoneJson`, `test/fixtures/unreal_sample_1118.json`)은 보정 0건으로 그대로 통과한다.
+- `danger` 구역이 언리얼에서 피해 판정·바닥 표시까지 동작. validator는 `danger`를 그대로 유지하고 경로 근접·겹침 규칙을 combat과 같이 적용한다.
+- `path_width`가 언리얼 길 폭(스케일)에 실제로 반영된다.
+- 분기/danger를 대화에서 만들어 내는 일은 LLM 파트 몫으로 두고, 규칙 해석기(대체 경로)는 만들지 않는다.
 
 ### 언리얼에서 붙여보기
 
@@ -137,6 +145,7 @@ Content-Type: application/json
 | 3 | path | 숫자 아닌 점 제거 → 점 2~12 → 가장자리 여백 → **근접점 병합(0.02)** → **2-opt로 자기교차 해소** → **급회전(<25°) 완화/제거** → **spawn-goal 거리 0.45 확보** (안정될 때까지 반복). 복구 불가면 기본 경로 |
 | 4 | areas 값 | area_type 화이트리스트(밖이면 combat), radius [0.01, 0.30], detail [0,1], 중심 누락 시 경로 위 균등 배치 |
 | 5 | 구조 | spawn/goal 정확히 1개(여분은 combat으로 강등, 없으면 추가), `combat_count` 반영(부족분은 가장 넓은 빈 구간에 추가), 구역 ≤ 8 |
+| 3b | branch | `branch_paths` 최대 2개. 타입 `branch`/`shortcut`(그 외 branch), 폭 [100,1500] 기본 400, 메인과 같은 기하 보정(spawn-goal 거리 제외) → 시작점을 메인 경로 위로 스냅, shortcut은 끝점도 스냅하고 역방향이면 뒤집음 → 점 2개 미만·길이 < 0.1·교차 잔존·shortcut 진행도 차 < 0.06이면 버림 |
 | 6 | 결합 | spawn 중심 = 경로 첫 점, goal 중심 = 경로 끝 점으로 스냅 |
 | 7 | 정렬 | 각 구역을 경로에 투영해 **호길이 진행도 t**로 정렬 (x좌표 정렬은 위→아래 경로에서 틀림) |
 | 8 | 간격/근접/겹침 | 경로 좌표계(t, 수직 오프셋)에서 1D 간격 문제로 풀어 인접 간격 0.06 확보, 오프셋을 r+0.12 이내로 제한, 반지름은 "입력값과 최종 위치에서 겹치지 않는 최대값" 중 작은 쪽 → 겹침 0 |
@@ -218,4 +227,6 @@ npm run test:report      # docs/TEST_RESULTS_1차.md, .docx (python-docx 필요)
 - vLLM 경로는 목(fetch 주입)으로만 검증됨. LLM 파트 서버가 열리면 `.env`에 `LLM_API_URL`만 넣으면 된다(프롬프트 품질은 그때 조정).
 - 규칙 기반 해석기는 키워드 표 범위에서만 대화를 이해한다. 표에 없는 표현은 기본값(forest, 전투 1)으로 간다.
 - 과밀 입력(큰 반지름 여러 개)에서는 반지름이 줄어든다. 의도적 선택: 중심 위치(LLM의 배치 의도)를 반지름보다 우선 보존.
-- `path_width`/`detail_density`는 언리얼 쪽에서 아직 PCG 파라미터에 연결되지 않음(클라이언트 후속 작업).
+- `path_width`는 언리얼 11-18부터 반영됨. `detail_density`는 언리얼이 파싱만 하고 PCG 파라미터 연결은 확인되지 않음(클라이언트 후속 작업).
+- 분기 위에 구역을 배치하지 않는다(구역은 메인 경로 기준). 분기-메인 교차 여부는 검사하지 않는다.
+- LLM 파트 스키마(9-28)에는 `danger`/`branch_paths`가 없다. `pcg_json`으로 넣거나 LLM 스키마가 확장되면 그대로 보정된다.
