@@ -24,6 +24,8 @@
   .panel li { font-size:23px; line-height:1.35; padding-left:30px; position:relative; }
   .panel li::before { content:"•"; position:absolute; left:6px; color:var(--blue); font-weight:800; }
   .panel li b { font-weight:800; }
+  .panel ul.one { grid-template-columns:1fr; gap:10px; }
+  .gap { width:24px; }
 </style></head><body><div class="wrap">
   <div class="sub">대화 → Zone JSON → 언리얼 월드까지 이어지는 서버 파이프라인과, 그 결과를 계약대로 맞추는 보정·검증 엔진</div>
   <div class="steps">
@@ -31,18 +33,24 @@
     <div class="arrow">➜</div>
     <div class="card"><div class="num">02</div><h3>Zone 해석</h3><div class="d">vLLM + JSON Schema</div><div class="t">실패 시 Rule Fallback</div></div>
     <div class="arrow">➜</div>
-    <div class="card"><div class="num">03</div><h3>Zone 보정·검증</h3><div class="d">범위·경로·구역·combat 개수</div><div class="t">결정적 · 멱등</div></div>
+    <div class="card"><div class="num">03</div><h3>Zone 보정·검증</h3><div class="d">경로·<b>분기</b>·구역·combat 개수</div><div class="t">결정적 · 멱등</div></div>
     <div class="arrow">➜</div>
-    <div class="card"><div class="num">04</div><h3>Unreal 실행</h3><div class="d">Zone JSON → PCG 월드 생성</div><div class="t">Backend → Unreal</div></div>
+    <div class="card"><div class="num">04</div><h3>Unreal 실행</h3><div class="d">메인+분기 경로 → PCG 월드</div><div class="t">Backend → Unreal</div></div>
   </div>
   <div class="bottom">
+    <div class="panel">
+      <h4>언리얼 11/18 연동 반영 <span class="now">반영</span></h4>
+      <ul class="one">
+        <li>분기 경로(branch_paths) 보정: 메인 경로에 연결, <b>깨진 분기만 제거</b></li>
+        <li>언리얼 파서 재현 갱신 · 자동 테스트 <b>114건 실패 0</b></li>
+      </ul>
+    </div>
+    <div class="gap"></div>
     <div class="panel plan">
       <h4>역할 전환 <span>계획</span></h4>
-      <ul>
-        <li>현재는 LLM 모듈이 1차 보정, 백엔드가 계약 기준으로 재검증</li>
+      <ul class="one">
         <li>LLM 모듈의 보정 단계가 빠지면 <b>백엔드가 보정·검증을 전담</b></li>
-        <li>실제 vLLM 출력 수집 → 회귀 테스트셋 구축, 보정 규칙 재조정</li>
-        <li>대화의 난이도 의도(상승·하강·중반 고비)를 받아 <b>곡선 형태 보장</b></li>
+        <li>vLLM 출력 회귀 테스트셋 · NPC 대화→언리얼 <b>통합 테스트</b></li>
       </ul>
     </div>
   </div>
