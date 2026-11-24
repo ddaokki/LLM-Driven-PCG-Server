@@ -67,7 +67,7 @@ const SYSTEM_PROMPT = `너는 플레이어와 NPC의 대화를 읽고, 다음 �
 [반드시 지킬 규칙]
 - main_path는 spawn에서 시작해 goal에서 끝나는 하나의 이어진 길이다. normalized_points의 첫 점이 spawn 중심, 마지막 점이 goal 중심이다.
 - spawn과 goal은 직선거리로 0.45 이상 떨어뜨린다.
-- 길은 자기 자신과 교차하지 않고, 제자리로 확 꺾여 되돌아가지 않는다. 모든 좌표는 0.05~0.95 사이.
+- 길은 자기 자신과 교차하지 않고, 제자리로 확 꺾여 되돌아가지 않는다. 모든 좌표는 0.03~0.97 사이.
 - combat_count에 대화에서 요청된 전투 횟수를 먼저 적는다. "3회", "세 번", "전투 3개"는 모두 3. 언급이 없으면 1, "전투 없이"면 0.
 - areas에는 spawn 1개, goal 1개, combat은 정확히 combat_count개. combat 원의 가장자리는 길에서 0.12 이상 떨어지지 않게 한다.
 - 전투끼리는 겹치지 않게 떨어뜨린다.
@@ -114,6 +114,8 @@ async function callVllm({ dialogue, context, apiUrl, model, timeoutMs, fetchImpl
       model: model || "default",
       messages: buildMessages({ dialogue, context }),
       temperature: 0.8,
+      max_tokens: 1800,
+      chat_template_kwargs: { enable_thinking: false }, // LLM 레포 app.py ask()와 동일: Qwen3 thinking이 켜지면 JSON 앞에 생각이 붙어 파싱 실패
       response_format: { type: "json_schema", json_schema: { name: "zone_layout", schema: ZONE_SCHEMA } },
     };
     if (seed !== undefined && seed !== null) body.seed = Number(seed) >>> 0;

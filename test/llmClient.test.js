@@ -30,6 +30,10 @@ test("LLM-01 vllm 정상 응답 → source=vllm, 후보는 LLM JSON", async () =
   const body = JSON.parse(calls[0].init.body);
   assert.equal(body.response_format.type, "json_schema");
   assert.ok(body.messages.some((m) => m.role === "user" && m.content.includes("바위 많은 사막")));
+  // LLM 레포 app.py ask()와 같은 호출 인자 (Qwen3 thinking 끄기, 토큰 상한)
+  assert.equal(body.max_tokens, 1800);
+  assert.deepEqual(body.chat_template_kwargs, { enable_thinking: false });
+  assert.ok(body.messages[0].content.includes("0.03~0.97"));
 });
 
 test("LLM-02 500 응답 → rule 폴백 + llm_error", async () => {
