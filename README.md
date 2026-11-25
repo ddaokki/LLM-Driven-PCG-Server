@@ -39,7 +39,7 @@ REDIS_URL=redis://127.0.0.1:6379
 LLM_MODE=auto                   # auto | vllm | rule
 LLM_API_URL=                    # 예: http://gpu-server:8000/v1  (비우면 규칙 기반)
 LLM_MODEL=Qwen/Qwen3-8B
-LLM_TIMEOUT_MS=8000
+LLM_TIMEOUT_MS=30000
 ```
 
 헬스체크:

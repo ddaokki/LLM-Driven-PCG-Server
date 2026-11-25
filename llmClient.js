@@ -144,7 +144,7 @@ async function generateZoneCandidate(opts = {}) {
   const mode = (opts.mode || process.env.LLM_MODE || "auto").toLowerCase();
   const apiUrl = opts.apiUrl !== undefined ? opts.apiUrl : process.env.LLM_API_URL || "";
   const model = opts.model || process.env.LLM_MODEL || "";
-  const timeoutMs = Number(opts.timeoutMs || process.env.LLM_TIMEOUT_MS || 8000);
+  const timeoutMs = Number(opts.timeoutMs || process.env.LLM_TIMEOUT_MS || 30000); // Qwen3-8B JSON 생성은 8초를 넘길 수 있음. 클라 요청 timeout은 180초
   const fetchImpl = opts.fetchImpl || globalThis.fetch;
 
   const tryLlm = mode === "vllm" || (mode === "auto" && apiUrl);
