@@ -129,3 +129,11 @@ test("BE-T09 Redis 미연결 상태에서 /api/chat/send → 503, /api/world/gen
   assert.equal(w.json.success, true);
   assert.equal(w.json.dataForUnreal.theme, "snow");
 });
+
+test("RAW-01 ?raw=1 → 보정 없이 후보를 그대로 반환 (theme·좌표·combat_count 유지)", async () => {
+  const pcg = { theme: "desert", combat_count: 2, base_environment: { tree_density: 0.9 }, main_path: { path_type: "main", path_width: 50, normalized_points: [{ x: 1.5, y: 0.5 }, { x: 0.9, y: 0.5 }] }, areas: [{ area_type: "lava", normalized_center: { x: 0.5, y: 0.5 } }] };
+  const r = await fetch(base + "/generate-zone?raw=1", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pcg_json: pcg }) });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("x-zone-source"), "pcg_json");
+  assert.deepEqual(await r.json(), pcg);
+});

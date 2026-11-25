@@ -56,12 +56,20 @@ function createApp() {
         candidate = r.candidate; source = r.source; llmError = r.llm_error;
       }
 
+      // ?raw=1 또는 PCG_RAW=1: 보정(validator) 없이 후보(LLM 원본, LLM 실패 시 rule 후보)를 그대로 반환 — 통합 디버깅용
+      if (req.query.raw === "1" || process.env.PCG_RAW === "1") {
+        const out = Object.fromEntries(Object.entries(candidate || {}).filter(([k]) => !k.startsWith("_")));
+        console.log(`[generate-zone RAW] user=${userId} source=${source} theme=${out.theme}${llmError ? ` llm_error="${llmError}"` : ""}`);
+        res.set("X-Zone-Source", source);
+        return res.json(out);
+      }
+
       // combat_count가 오면 후보 출처와 무관하게 validator가 최종 개수를 강제한다
       // (rule 후보는 이미 반영돼 있어 no-op, vllm 후보는 LLM이 개수를 틀릴 수 있으므로 여기서 맞춘다)
       const options = combat_count !== undefined && combat_count !== null ? { combatCount: combat_count } : {};
       const { zone, report } = validateWithReport(candidate, options);
 
-      console.log(`[generate-zone] user=${userId} source=${source} corrections=${report.correction_count} hard=${report.hard_violations_before} score=${report.quality_score} combats=${zone.areas.filter((a) => a.area_type === "combat").length}${llmError ? ` llm_error="${llmError}"` : ""}`);
+      console.log(`[generate-zone] user=${userId} source=${source} theme=${zone.theme} corrections=${report.correction_count} hard=${report.hard_violations_before} score=${report.quality_score} combats=${zone.areas.filter((a) => a.area_type === "combat").length}${llmError ? ` llm_error="${llmError}"` : ""}`);
 
       if (debug) {
         zone.validation_report = {
